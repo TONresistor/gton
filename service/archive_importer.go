@@ -65,6 +65,8 @@ type archiveCatchUpRun struct {
 	lastProgressShardBlocksReused  uint64
 	progressStats                  archiveCatchUpProgressStats
 	lastProgressStats              archiveCatchUpProgressStats
+	handoffProbeSeqno              uint32
+	nextHandoffProbe               time.Time
 	pipelineWaitStarted            time.Time
 	checkpointDone                 chan archiveCheckpointResult
 	checkpointJoined               chan struct{}
@@ -215,8 +217,7 @@ func (r *archiveCatchUpRun) run() (result *storage.CurrentState, runErr error) {
 				Msg("yielding archive shard-client catch-up for cell generation switch")
 			break
 		}
-		blockUTime := blockStateUtime(r.ctx, a.storage, &r.current.Masterchain)
-		if lagSeconds := time.Now().Unix() - blockUTime; blockUTime != 0 && shouldSwitchArchiveToNextByLag(lagSeconds) {
+		if window.handoff != nil {
 			if r.checkpointDone != nil || r.current.ShardClientSeqno > r.lastCheckpointSeqno {
 				a.log.Info().
 					Str("masterchain", storage.FormatBlockRef(r.current.Masterchain.Block)).
@@ -236,10 +237,11 @@ func (r *archiveCatchUpRun) run() (result *storage.CurrentState, runErr error) {
 				}
 			}
 			handoffToNext = true
+			blockUTime := blockStateUtime(r.ctx, a.storage, &r.current.Masterchain)
 			a.log.Info().
 				Str("current", storage.FormatBlockRef(r.current.Masterchain.Block)).
 				Str("target", storage.FormatBlockRef(r.target)).
-				Int64("lag_seconds", lagSeconds).
+				Int64("lag_seconds", time.Now().Unix()-blockUTime).
 				Int64("switch_to_next_lag_seconds", archiveToNextLagSeconds).
 				Uint32("checkpoint_blocks", handoffCheckpointBlocks).
 				Bool("checkpoint_in_flight", r.checkpointDone != nil).
@@ -325,19 +327,6 @@ func (r *archiveCatchUpRun) commitAcceptedArchiveWindow(window *shardClientArchi
 	r.current = next
 	r.archive.currentTransitions.archiveCurrentAdvanced(r.current)
 	return nil
-}
-
-func (r *archiveCatchUpRun) shouldHandoffToNextBlock() bool {
-	latest, err := r.archive.network.ObservedMasterchainBlock()
-	if err != nil || !shouldPreferNextBlockTarget(r.current.Masterchain.Block.SeqNo, latest.SeqNo) {
-		return false
-	}
-	if r.archive.network.IsHardfork(latest) {
-		return true
-	}
-
-	blockUTime := blockStateUtime(r.ctx, r.archive.storage, &r.current.Masterchain)
-	return blockUTime != 0 && shouldSwitchArchiveToNextByLag(time.Now().Unix()-blockUTime)
 }
 
 func (r *archiveCatchUpRun) shutdown() error {

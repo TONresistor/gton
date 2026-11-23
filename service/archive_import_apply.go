@@ -23,6 +23,7 @@ type archiveShardBlockLoader struct {
 }
 
 type shardClientArchiveWindow struct {
+	handoff        *storage.CurrentState // already applied by the bounded live trial
 	startSeqno     uint32
 	masterStats    *archive.ImportStats
 	totalStats     *archive.ImportStats
@@ -432,6 +433,9 @@ func (w *shardClientArchiveWindow) rememberAppliedArchiveState(state *storage.Bl
 }
 
 func (r *archiveCatchUpRun) applyShardClientArchiveWindow(ctx context.Context, current *storage.CurrentState, window *shardClientArchiveWindow) (*storage.CurrentState, error) {
+	if window.handoff != nil {
+		return window.handoff, nil
+	}
 	applied := map[storage.BlockRootHash]*storage.BlockState{}
 	next := storage.CloneCurrentState(current)
 	applyStarted := time.Now()

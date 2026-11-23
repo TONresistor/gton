@@ -49,6 +49,7 @@ type archiveMasterImportResult struct {
 type archiveWindowPipeline struct {
 	cancel   context.CancelFunc
 	done     chan archiveWindowResult
+	request  chan uint32
 	joined   chan struct{}
 	progress *archiveWindowPipelineProgress
 }
@@ -86,13 +87,15 @@ func (r *archiveCatchUpRun) startShardClientArchiveWindowPipeline() *archiveWind
 	pipeline := &archiveWindowPipeline{
 		cancel:   cancel,
 		done:     make(chan archiveWindowResult, 1),
+		request:  make(chan uint32),
 		joined:   make(chan struct{}),
 		progress: progress,
 	}
+	current := archivePipelineCurrent(r.current)
 	targetSeqno := r.target.SeqNo
 	go func() {
 		defer close(pipeline.joined)
-		r.runShardClientArchiveWindowPipeline(pipelineCtx, archivePipelineCurrent(r.current), targetSeqno, pipeline.done, progress)
+		r.runShardClientArchiveWindowPipeline(pipelineCtx, current, targetSeqno, pipeline)
 	}()
 	return pipeline
 }
@@ -111,7 +114,8 @@ func (p *archiveWindowPipeline) stop() {
 	}
 }
 
-func (r *archiveCatchUpRun) runShardClientArchiveWindowPipeline(ctx context.Context, current *storage.CurrentState, targetSeqno uint32, out chan<- archiveWindowResult, progress *archiveWindowPipelineProgress) {
+func (r *archiveCatchUpRun) runShardClientArchiveWindowPipeline(ctx context.Context, current *storage.CurrentState, targetSeqno uint32, pipeline *archiveWindowPipeline) {
+	out, progress := pipeline.done, pipeline.progress
 	defer close(out)
 
 	taskCtx, cancelTasks := context.WithCancel(ctx)
@@ -144,6 +148,18 @@ func (r *archiveCatchUpRun) runShardClientArchiveWindowPipeline(ctx context.Cont
 
 	for (!planningStopped && planning.ShardClientSeqno < targetSeqno) || len(pending) > 0 {
 		for !planningStopped && planningErr == nil && r.canScheduleArchiveWindow(planning, len(pending), targetSeqno) {
+			if archivePlanningNearLiveTail(planning) {
+				nextSeqno := planning.ShardClientSeqno + 1
+				progress.setPlanning(nextSeqno, "waiting_for_live_trial")
+				select {
+				case requested := <-pipeline.request:
+					if requested != nextSeqno {
+						continue
+					}
+				case <-taskCtx.Done():
+					return
+				}
+			}
 			planningProgress := progress
 			if len(pending) > 0 {
 				planningProgress = nil
@@ -312,12 +328,15 @@ func (r *archiveCatchUpRun) canScheduleArchiveWindow(planning *storage.CurrentSt
 	if pending >= r.archive.prefetchWindows {
 		return false
 	}
-	if planning.Masterchain.Parsed != nil &&
-		planning.Masterchain.Parsed.GenUTime != 0 &&
-		shouldSwitchArchiveToNextByLag(time.Now().Unix()-int64(planning.Masterchain.Parsed.GenUTime)) {
-		return false
-	}
-	return true
+	return pending == 0 || !archivePlanningNearLiveTail(planning)
+}
+
+func archivePlanningNearLiveTail(planning *storage.CurrentState) bool {
+	return planning.Masterchain.Parsed != nil && archiveMasterNearLiveTail(planning.Masterchain.Parsed.GenUTime)
+}
+
+func archiveMasterNearLiveTail(genUTime uint32) bool {
+	return genUTime != 0 && shouldSwitchArchiveToNextByLag(time.Now().Unix()-int64(genUTime))
 }
 
 func advanceArchivePipelineCurrent(current *storage.CurrentState, window *shardClientArchiveWindow) *storage.CurrentState {
@@ -350,16 +369,20 @@ func lastArchiveWindowMasterState(window *shardClientArchiveWindow) *storage.Blo
 }
 
 func (r *archiveCatchUpRun) nextArchiveWindowWithProgress() (*shardClientArchiveWindow, error) {
-	if r.shouldHandoffToNextBlock() {
-		return nil, errArchiveNextBlockReady
+	if window, err := r.liveHandoffWindow(); window != nil || err != nil {
+		return window, err
 	}
 
 	ticker := time.NewTicker(archiveCatchUpProgressInterval)
 	defer ticker.Stop()
 	r.startPipelineWaitProgress()
+	request := r.pipeline.request
+	nextSeqno := r.current.ShardClientSeqno + 1
 
 	for {
 		select {
+		case request <- nextSeqno:
+			request = nil
 		case res, ok := <-r.pipeline.done:
 			r.stopPipelineWaitProgress(time.Now())
 			if !ok {
@@ -367,9 +390,9 @@ func (r *archiveCatchUpRun) nextArchiveWindowWithProgress() (*shardClientArchive
 			}
 			return res.window, res.err
 		case <-ticker.C:
-			if r.shouldHandoffToNextBlock() {
+			if window, err := r.liveHandoffWindow(); window != nil || err != nil {
 				r.stopPipelineWaitProgress(time.Now())
-				return nil, errArchiveNextBlockReady
+				return window, err
 			}
 			if err := r.logProgress(); err != nil {
 				return nil, err
@@ -1010,7 +1033,12 @@ func (r *archiveCatchUpRun) prepareArchiveMasterWindow(ctx context.Context, queu
 	}
 	var nextMasterTask *archiveMasterImportTask
 	var nextMasterDownload *archiveMasterDownloadTask
-	if nextSeqno, ok := nextArchiveMasterDownloadSeqno(masterResult.masterSequence, targetSeqno); ok && !reachesSyncUntil {
+	nextSeqno, prefetchNextMaster := nextArchiveMasterDownloadSeqno(masterResult.masterSequence, targetSeqno)
+	if prefetchNextMaster {
+		last := masterResult.masterSequence[len(masterResult.masterSequence)-1]
+		prefetchNextMaster = !reachesSyncUntil && !archiveMasterNearLiveTail(last.Meta.GenUTime)
+	}
+	if prefetchNextMaster {
 		if overlapStart, ok := archiveMasterOverlapStart(masterResult); ok {
 			// Prepare and precheck of the next window are state-independent, so
 			// the whole import task overlaps with this window's master apply
@@ -1063,7 +1091,7 @@ func (r *archiveCatchUpRun) prepareArchiveMasterWindow(ctx context.Context, queu
 		lastMaster:   lastMaster,
 		masterImport: masterImport,
 	}
-	if !window.syncUntilReached && lastMaster.Block.SeqNo < targetSeqno {
+	if prefetchNextMaster && !window.syncUntilReached && lastMaster.Block.SeqNo < targetSeqno {
 		if nextMasterTask == nil || nextMasterTask.startSeqno != lastMaster.Block.SeqNo+1 {
 			if nextMasterTask != nil {
 				nextMasterTask.stop()

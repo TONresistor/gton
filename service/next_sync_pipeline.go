@@ -654,7 +654,7 @@ func (r *nextSyncRunner) applyMaster(master *storage.BlockState, item nextMaster
 	prepared := item.block
 	applied.block = prepared
 
-	targets, elapsed, err := r.shardTargetsForMasterBlock(prepared)
+	targets, elapsed, err := shardTargetsForMasterBlock(prepared)
 	applied.shardTargets = targets
 	applied.shardTargetsParsed = true
 	applied.shardTargetParse = elapsed
@@ -740,7 +740,7 @@ func (r *nextSyncRunner) sendAppliedMaster(out chan<- nextAppliedMaster, item ne
 	}
 }
 
-func (r *nextSyncRunner) shardTargetsForMasterBlock(block PreparedBlock) ([]ton.BlockIDExt, time.Duration, error) {
+func shardTargetsForMasterBlock(block PreparedBlock) ([]ton.BlockIDExt, time.Duration, error) {
 	started := time.Now()
 	parsed, err := parsePreparedBlock(block)
 	if err != nil {

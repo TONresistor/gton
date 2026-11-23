@@ -569,7 +569,7 @@ func testShardTargetsMcStateExtra(t *testing.T, shards ...ton.BlockIDExt) *cell.
 		MustStoreDict(shardHashes).
 		MustStoreSlice(make([]byte, 32), 256).
 		MustStoreRef(configParams.AsCell()).
-		MustStoreRef(cell.BeginCell().EndCell()).
+		MustStoreRef(testMonitorMasterInfo(t, testMasterBlockID(1), false)).
 		MustStoreCoins(0).
 		MustStoreDict(nil).
 		EndCell()

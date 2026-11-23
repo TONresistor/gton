@@ -56,6 +56,7 @@ type ArchiveStore interface {
 // and the post-apply publication policy so archive code does not depend on the
 // coordinator's individual caches and publishers.
 type archiveMasterTransitions interface {
+	probeArchiveSuccessor(context.Context, *storage.BlockState) (PreparedBlock, []ton.BlockIDExt, error)
 	masterchainValidatorsForConsensus(*storage.BlockState, ton.BlockIDExt, masterchainValidatorCacheKey) (*blockproof.PreparedValidatorSet, error)
 	applyArchiveMasterBlock(context.Context, *storage.BlockState, *PreparedBlock, *masterchainConsensusProof, stateUpdateApplier, *blockAppliedObserverMeta) (*storage.BlockState, masterchainApplyTiming, time.Duration, error)
 	archiveBlockAppliedEnabled() bool
@@ -63,6 +64,7 @@ type archiveMasterTransitions interface {
 }
 
 type archiveShardTransitions interface {
+	probeArchiveShard(context.Context, ton.BlockIDExt) (PreparedBlock, error)
 	applyArchiveShardBlock(context.Context, ton.BlockIDExt, []*storage.BlockState, PreparedBlock, stateUpdateApplier, *blockAppliedObserverMeta) (*storage.BlockState, error)
 }
 
@@ -275,7 +277,7 @@ func (s *SyncCoordinator) applyArchiveMasterBlock(ctx context.Context, current *
 	block.consensus = proof
 
 	consensusStarted := time.Now()
-	checked, err := s.checkMasterchainBlockConsensusWithProof(current, proof)
+	checked, err := s.checkedConsensusForPreparedBlock(current, *block)
 	consensusElapsed := time.Since(consensusStarted)
 	if err != nil {
 		return nil, masterchainApplyTiming{}, consensusElapsed, err

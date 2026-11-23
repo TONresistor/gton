@@ -92,7 +92,7 @@ func TestArchivePipelineSchedulingUsesPendingWindowLimit(t *testing.T) {
 	}
 }
 
-func TestArchivePipelineSchedulingStopsNearLiveTail(t *testing.T) {
+func TestArchivePipelineSchedulingAllowsOnlyOneWindowNearLiveTail(t *testing.T) {
 	runner := &archiveCatchUpRun{
 		archive: &ArchiveRunner{prefetchWindows: 2},
 		target:  testMasterBlockID(1000),
@@ -105,8 +105,11 @@ func TestArchivePipelineSchedulingStopsNearLiveTail(t *testing.T) {
 		},
 	}
 
-	if runner.canScheduleArchiveWindow(planning, 0, runner.target.SeqNo) {
-		t.Fatal("pipeline should stop scheduling archive windows below the live-tail lag")
+	if !runner.canScheduleArchiveWindow(planning, 0, runner.target.SeqNo) {
+		t.Fatal("pipeline should allow a requested fallback window near the live tail")
+	}
+	if runner.canScheduleArchiveWindow(planning, 1, runner.target.SeqNo) {
+		t.Fatal("pipeline should drain the pending window before planning another near the live tail")
 	}
 }
 

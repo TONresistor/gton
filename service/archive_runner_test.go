@@ -39,6 +39,14 @@ func (s archiveRunnerNetworkStub) IsHardfork(block ton.BlockIDExt) bool {
 
 type archiveRunnerTransitionsStub struct{}
 
+func (archiveRunnerTransitionsStub) probeArchiveSuccessor(context.Context, *storage.BlockState) (PreparedBlock, []ton.BlockIDExt, error) {
+	return PreparedBlock{}, nil, storage.ErrNotFound
+}
+
+func (archiveRunnerTransitionsStub) probeArchiveShard(context.Context, ton.BlockIDExt) (PreparedBlock, error) {
+	return PreparedBlock{}, storage.ErrNotFound
+}
+
 func (archiveRunnerTransitionsStub) masterchainValidatorsForConsensus(*storage.BlockState, ton.BlockIDExt, masterchainValidatorCacheKey) (*blockproof.PreparedValidatorSet, error) {
 	return nil, nil
 }
@@ -217,11 +225,11 @@ func TestArchiveRunnerBindIsOneShotAndFrozenAfterUse(t *testing.T) {
 	}
 }
 
-func TestArchiveWindowWaitHandsOffToNearbyObservedTarget(t *testing.T) {
+func TestArchiveWindowWaitHandsOffToConfiguredHardfork(t *testing.T) {
 	current := testMasterBlockID(150)
 	run := &archiveCatchUpRun{
 		archive: &ArchiveRunner{network: archiveRunnerNetworkStub{
-			observed: testMasterBlockID(151),
+			observed: testMasterBlockID(151), hardfork: testMasterBlockID(151),
 		}},
 		current: &storage.CurrentState{
 			ShardClientSeqno: current.SeqNo,
@@ -244,6 +252,7 @@ func TestArchiveWindowKeepsHistoricalObservedTarget(t *testing.T) {
 	run := &archiveCatchUpRun{
 		archive: &ArchiveRunner{network: archiveRunnerNetworkStub{observed: observed}},
 		current: &storage.CurrentState{
+			ShardClientSeqno: current.SeqNo,
 			Masterchain: storage.BlockState{
 				Block:  current,
 				Parsed: &tlb.ShardStateUnsplit{GenUTime: uint32(time.Now().Add(-time.Hour).Unix())},
@@ -251,12 +260,12 @@ func TestArchiveWindowKeepsHistoricalObservedTarget(t *testing.T) {
 		},
 	}
 
-	if run.shouldHandoffToNextBlock() {
+	if w, err := run.liveHandoffWindow(); w != nil || err != nil {
 		t.Fatal("historical archive window must not be discarded for a nearby observed block")
 	}
 
 	run.archive.network = archiveRunnerNetworkStub{observed: observed, hardfork: observed}
-	if !run.shouldHandoffToNextBlock() {
+	if _, err := run.liveHandoffWindow(); !errors.Is(err, errArchiveNextBlockReady) {
 		t.Fatal("configured immediate hardfork should still use next-block sync")
 	}
 }
@@ -379,7 +388,7 @@ func TestArchiveWindowHandoffDropsPrefetchedBlockAppliedEvents(t *testing.T) {
 	transitions := &archiveBlockAppliedTransitionsRecorder{}
 	run := &archiveCatchUpRun{
 		archive: &ArchiveRunner{
-			network:           archiveRunnerNetworkStub{observed: nextBlock},
+			network:           archiveRunnerNetworkStub{observed: nextBlock, hardfork: nextBlock},
 			masterTransitions: transitions,
 		},
 		current: &storage.CurrentState{

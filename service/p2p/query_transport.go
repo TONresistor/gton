@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"sync/atomic"
+	"time"
 
 	adnloverlay "github.com/xssnick/tonutils-go/adnl/overlay"
 	"github.com/xssnick/tonutils-go/adnl/rldp"
@@ -236,6 +237,49 @@ func (t quicPeerQueryTransport) QueryRaw(
 		return nil, fmt.Errorf("query quic overlay: %w", err)
 	}
 	return answer, nil
+}
+
+func (p *overlayPeer) readTransport(ctx context.Context) peerQueryTransport {
+	if p.publicQUIC == nil {
+		return p.queryTransport
+	}
+
+	p.statsMx.Lock()
+	major, minor := p.versionMajor, p.versionMinor
+	probe := major == 0 && !time.Now().Before(p.readCapabilitiesRetryAt) && ctx.Err() == nil
+	if probe {
+		p.readCapabilitiesRetryAt = time.Now().Add(30 * time.Second)
+	}
+	p.statsMx.Unlock()
+
+	if probe {
+		p.probePublicReadCapabilities(ctx)
+		p.statsMx.Lock()
+		major, minor = p.versionMajor, p.versionMinor
+		p.statsMx.Unlock()
+	}
+	if peerEligibleVersion(major, minor, 3, 3) {
+		return p.publicQUIC
+	}
+	return p.queryTransport
+}
+
+func (p *overlayPeer) probePublicReadCapabilities(ctx context.Context) {
+	var cap Capabilities
+	probeCtx, cancel := context.WithTimeout(ctx, 350*time.Millisecond)
+	err := p.overlay.Query(probeCtx, GetCapabilities{}, &cap)
+	cancel()
+	if err == nil && cap.VersionMajor > 0 && cap.VersionMinor >= 0 {
+		p.applyCapabilities(cap)
+		return
+	}
+
+	probeCtx, cancel = context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	if err := p.publicQUIC.Query(probeCtx, 1024, GetCapabilities{}, &cap); err == nil &&
+		cap.VersionMajor > 0 && cap.VersionMinor >= 0 {
+		p.applyCapabilities(cap)
+	}
 }
 
 func parsePeerQueryAnswer(result tl.Serializable, answer []byte) error {

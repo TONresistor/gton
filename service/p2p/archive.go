@@ -52,6 +52,7 @@ type archiveSliceResult struct {
 }
 
 type archiveCandidate struct {
+	transport   peerQueryTransport
 	peer        *overlayPeer
 	archiveID   int64
 	seedSlice   []byte
@@ -63,6 +64,7 @@ type archiveCandidate struct {
 }
 
 type resolvedArchive struct {
+	transport        peerQueryTransport
 	MasterchainSeqno uint32
 	Shard            archive.ShardID
 	ArchiveID        int64
@@ -203,6 +205,7 @@ func (s *overlaySubscription) resolveArchive(ctx context.Context, session *Archi
 		peers:            peers,
 		infoHedged:       hedge,
 		query:            info.candidate.query,
+		transport:        info.candidate.transport,
 	}, nil
 }
 
@@ -259,6 +262,7 @@ func (s *overlaySubscription) downloadArchiveFromResolved(ctx context.Context, s
 			seedMaxSize: resolved.seedMaxSize,
 			hasSeed:     resolved.hasSeed,
 			query:       resolved.query,
+			transport:   resolved.transport,
 		}
 	}
 	return s.downloadArchiveFromPeers(ctx, session, pool, resolved, ordered, candidates, options)
@@ -522,6 +526,10 @@ func formatArchiveCandidateRate(candidate archiveCandidate) string {
 func (s *overlaySubscription) downloadArchiveFromPeer(ctx context.Context, session *ArchiveSession, pool *archivePeerPool, resolved resolvedArchive, candidate archiveCandidate, selectOnSuccess bool) (downloaded *archive.Downloaded, err error) {
 	peer := candidate.peer
 	archiveID := candidate.archiveID
+	transport := candidate.transport
+	if transport == nil {
+		transport = peer.readTransport(ctx)
+	}
 
 	archiveRelease, ok := pool.acquire(peer)
 	if !ok {
@@ -638,7 +646,7 @@ func (s *overlaySubscription) downloadArchiveFromPeer(ctx context.Context, sessi
 
 						data, err := s.queryArchiveSliceWithTimeout(
 							sliceCtx,
-							peer,
+							transport,
 							archiveID,
 							requestOffset,
 							archiveSliceSize,
@@ -781,7 +789,7 @@ func checkArchivePackMagic(data []byte) error {
 
 func (s *overlaySubscription) queryArchiveSliceWithTimeout(
 	ctx context.Context,
-	peer *overlayPeer,
+	transport peerQueryTransport,
 	archiveID int64,
 	offset int64,
 	maxSize int32,
@@ -792,7 +800,9 @@ func (s *overlaySubscription) queryArchiveSliceWithTimeout(
 		Offset:    offset,
 		MaxSize:   maxSize,
 	}
-	return s.queryArchiveRawFromPeerWithLimits(ctx, peer, query, timeout, uint64(maxSize)+4096)
+	queryCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return transport.QueryRaw(queryCtx, uint64(maxSize)+4096, query)
 }
 
 func (s *overlaySubscription) fetchArchiveCandidate(ctx context.Context, session *ArchiveSession, pool *archivePeerPool, peer *overlayPeer, masterchainSeqno uint32, shard archive.ShardID, selectOnSeed bool) (candidate archiveCandidate, err error) {
@@ -809,7 +819,8 @@ func (s *overlaySubscription) fetchArchiveCandidate(ctx context.Context, session
 		}
 	}()
 
-	info, err := s.queryArchiveInfo(ctx, peer, masterchainSeqno, shard, archiveInfoTimeout)
+	transport := peer.readTransport(ctx)
+	info, err := s.queryArchiveInfo(ctx, transport, masterchainSeqno, shard, archiveInfoTimeout)
 	if err != nil {
 		if errors.Is(err, archive.ErrNotAvailable) {
 			pool.recordArchiveDemandNotAvailable(shard, masterchainSeqno, peer)
@@ -819,13 +830,14 @@ func (s *overlaySubscription) fetchArchiveCandidate(ctx context.Context, session
 	started := time.Now()
 	candidate = archiveCandidate{
 		peer:        peer,
+		transport:   transport,
 		archiveID:   info.ID,
 		seedMaxSize: archiveSliceProbeSize,
 		query:       query,
 	}
 	data, err := s.queryArchiveSliceWithTimeout(
 		ctx,
-		peer,
+		transport,
 		info.ID,
 		0,
 		archiveSliceProbeSize,
@@ -1013,12 +1025,12 @@ func (s *overlaySubscription) noteArchiveCandidateError(ctx context.Context, ses
 	session.rejectArchivePeer(ctx, pool, shard, peer, archivePeerRejectCandidateFailed)
 }
 
-func (s *overlaySubscription) queryArchiveInfo(ctx context.Context, peer *overlayPeer, masterchainSeqno uint32, shard archive.ShardID, timeout time.Duration) (ArchiveInfo, error) {
+func (s *overlaySubscription) queryArchiveInfo(ctx context.Context, transport peerQueryTransport, masterchainSeqno uint32, shard archive.ShardID, timeout time.Duration) (ArchiveInfo, error) {
 	queryCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	var resp tl.Serializable
-	if err := peer.queryTransport.Query(
+	if err := transport.Query(
 		queryCtx,
 		archiveInfoMaxAnswer,
 		archiveInfoQuery(masterchainSeqno, shard),

@@ -551,7 +551,7 @@ func (s *overlaySubscription) queryFromPeerWithLimits(ctx context.Context, peer 
 	defer cancel()
 
 	var resp tl.Serializable
-	if err := peer.queryTransport.Query(queryCtx, maxAnswerSize, req, &resp); err != nil {
+	if err := peer.readTransport(queryCtx).Query(queryCtx, maxAnswerSize, req, &resp); err != nil {
 		return nil, err
 	}
 

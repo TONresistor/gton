@@ -289,6 +289,7 @@ type overlayPeer struct {
 	rldp           *overlay.RLDPWrapper
 	rldpOverlay    *overlay.RLDPOverlayWrapper
 	queryTransport peerQueryTransport
+	publicQUIC     peerQueryTransport
 	broadcastPeer  overlay.BroadcastPeer
 	// localBroadcastPeer carries this node's own queued broadcasts to the
 	// peer. Over QUIC it waits for a missing outbound connection
@@ -307,6 +308,8 @@ type overlayPeer struct {
 	// the peer answered an outbound query of ours (cache eligibility).
 	srcScore   atomic.Uint32
 	outboundOK atomic.Bool
+
+	readCapabilitiesRetryAt time.Time // guarded by statsMx
 
 	statsMx           sync.Mutex
 	versionMajor      int32

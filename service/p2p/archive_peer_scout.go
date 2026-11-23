@@ -811,14 +811,15 @@ func (p *archivePeerPool) probeArchivePeerEvidence(ctx context.Context, peer *ov
 		}
 	}
 
-	info, err := p.sub.queryArchiveInfo(ctx, peer, probe.seqno, probe.shard, archiveInfoTimeout)
+	transport := peer.readTransport(ctx)
+	info, err := p.sub.queryArchiveInfo(ctx, transport, probe.seqno, probe.shard, archiveInfoTimeout)
 	if err != nil {
 		return archivePeerProbeResult{}, err
 	}
 	startedAt := time.Now()
 	data, err := p.sub.queryArchiveSliceWithTimeout(
 		ctx,
-		peer,
+		transport,
 		info.ID,
 		0,
 		archiveSliceProbeSize,

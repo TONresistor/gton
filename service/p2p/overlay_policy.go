@@ -142,6 +142,10 @@ func (spec *overlaySpec) usesDedicatedQueryPeers() bool {
 	return spec.Kind == overlayKindCustomFixed
 }
 
+func (spec *overlaySpec) usesVersionedReadTransport() bool {
+	return spec.Kind == overlayKindPublicShard
+}
+
 // usesV1PeerGossip reports whether overlay.getRandomPeers (v1 NodesList) is
 // exchanged with unattached directory rows. The kind term is what excludes
 // FastSync: it also sets RandomPeers, but speaks getRandomPeersV2 only.

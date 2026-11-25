@@ -21,16 +21,17 @@ func (handoffStore) BlockState(context.Context, ton.BlockIDExt) (*storage.BlockS
 
 type handoffPeers struct {
 	archiveRunnerTransitionsStub
-	masters       map[uint32]*storage.BlockState
-	targets       map[uint32]ton.BlockIDExt
-	available     map[uint32]PreparedBlock
-	masterReads   int
-	shardReads    int
-	masterApplies int
-	shardApplies  int
-	silentOnMiss  bool
-	checkOnMiss   func()
-	advanced      []uint32
+	masters        map[uint32]*storage.BlockState
+	targets        map[uint32]ton.BlockIDExt
+	available      map[uint32]PreparedBlock
+	masterReads    int
+	shardReads     int
+	masterApplies  int
+	shardApplies   int
+	silentOnMiss   bool
+	checkOnMiss    func()
+	advanced       []uint32
+	slowApplySeqno uint32
 }
 
 func (p *handoffPeers) probeArchiveSuccessor(ctx context.Context, prev *storage.BlockState) (PreparedBlock, []ton.BlockIDExt, error) {
@@ -65,7 +66,16 @@ func (p *handoffPeers) probeArchiveShard(ctx context.Context, id ton.BlockIDExt)
 	return PreparedBlock{}, storage.ErrNotFound
 }
 
-func (p *handoffPeers) applyArchiveMasterBlock(_ context.Context, _ *storage.BlockState, b *PreparedBlock, _ *masterchainConsensusProof, _ stateUpdateApplier, _ *blockAppliedObserverMeta) (*storage.BlockState, masterchainApplyTiming, time.Duration, error) {
+func (p *handoffPeers) applyArchiveMasterBlock(ctx context.Context, _ *storage.BlockState, b *PreparedBlock, _ *masterchainConsensusProof, _ stateUpdateApplier, _ *blockAppliedObserverMeta) (*storage.BlockState, masterchainApplyTiming, time.Duration, error) {
+	if b.ID.SeqNo == p.slowApplySeqno {
+		timer := time.NewTimer(nextBlockBootstrapProbeTimeout + 100*time.Millisecond)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return nil, masterchainApplyTiming{}, 0, ctx.Err()
+		case <-timer.C:
+		}
+	}
 	p.masterApplies++
 	return p.masters[b.ID.SeqNo], masterchainApplyTiming{}, 0, nil
 }
@@ -84,17 +94,18 @@ func (p *handoffPeers) archiveCurrentAdvanced(current *storage.CurrentState) {
 
 func TestArchiveHandoffMissingShard(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		silent bool
-	}{{"refused", false}, {"silent", true}} {
+		name      string
+		silent    bool
+		slowApply bool
+	}{{name: "refused"}, {name: "silent", silent: true}, {name: "slow_apply", slowApply: true}} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			testArchiveHandoffMissingShard(t, tc.silent)
+			testArchiveHandoffMissingShard(t, tc.silent, tc.slowApply)
 		})
 	}
 }
 
-func testArchiveHandoffMissingShard(t *testing.T, silent bool) {
+func testArchiveHandoffMissingShard(t *testing.T, silent, slowApply bool) {
 	t.Helper()
 	const (
 		first          = uint32(150)
@@ -226,6 +237,9 @@ func testArchiveHandoffMissingShard(t *testing.T, silent bool) {
 	}
 
 	p.available[liveShardSeqno] = prepared(liveShardSeqno)
+	if slowApply {
+		p.slowApplySeqno = liveSeqno
+	}
 	window, err := run.nextArchiveWindowWithProgress()
 	if err != nil || window == nil || window.handoff == nil || run.current.ShardClientSeqno != liveSeqno-1 {
 		t.Fatalf("available successor: handoff=%v err=%v", window != nil, err)

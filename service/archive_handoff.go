@@ -30,9 +30,7 @@ func (r *archiveCatchUpRun) liveHandoffWindow() (*shardClientArchiveWindow, erro
 
 	r.handoffProbeSeqno = master.Block.SeqNo
 	r.nextHandoffProbe = now.Add(archiveCatchUpProgressInterval)
-	ctx, cancel := context.WithTimeout(r.ctx, nextBlockBootstrapProbeTimeout)
-	defer cancel()
-	window, err := r.prepareLiveHandoff(ctx, master)
+	window, err := r.prepareLiveHandoff(r.ctx, master)
 	if err != nil {
 		r.archive.log.Debug().Err(err).Uint32("current", master.Block.SeqNo).Msg("live successor unavailable, continuing archive catch-up")
 		return nil, r.ctx.Err()
@@ -41,7 +39,10 @@ func (r *archiveCatchUpRun) liveHandoffWindow() (*shardClientArchiveWindow, erro
 }
 
 func (r *archiveCatchUpRun) prepareLiveHandoff(ctx context.Context, master *storage.BlockState) (*shardClientArchiveWindow, error) {
-	block, targets, err := r.archive.masterTransitions.probeArchiveSuccessor(ctx, master)
+	probeCtx, cancelProbe := context.WithTimeout(ctx, nextBlockBootstrapProbeTimeout)
+	defer cancelProbe()
+
+	block, targets, err := r.archive.masterTransitions.probeArchiveSuccessor(probeCtx, master)
 	if err != nil {
 		return nil, err
 	}
@@ -57,7 +58,7 @@ func (r *archiveCatchUpRun) prepareLiveHandoff(ctx context.Context, master *stor
 		targets = nil
 	}
 	for len(targets) != 0 {
-		if err := ctx.Err(); err != nil {
+		if err := probeCtx.Err(); err != nil {
 			return nil, err
 		}
 		id := targets[len(targets)-1]
@@ -71,12 +72,12 @@ func (r *archiveCatchUpRun) prepareLiveHandoff(ctx context.Context, master *stor
 			}
 			continue
 		}
-		if _, err := r.archive.storage.BlockState(ctx, id); err == nil {
+		if _, err := r.archive.storage.BlockState(probeCtx, id); err == nil {
 			continue
 		} else if !errors.Is(err, storage.ErrNotFound) {
 			return nil, err
 		}
-		shard, err := r.archive.shardTransitions.probeArchiveShard(ctx, id)
+		shard, err := r.archive.shardTransitions.probeArchiveShard(probeCtx, id)
 		if err != nil {
 			return nil, err
 		}
@@ -93,9 +94,11 @@ func (r *archiveCatchUpRun) prepareLiveHandoff(ctx context.Context, master *stor
 		blocks[storage.BlockKey(id)] = shard
 	}
 
-	if err := ctx.Err(); err != nil {
+	if err := probeCtx.Err(); err != nil {
 		return nil, err
 	}
+	cancelProbe()
+
 	window := &shardClientArchiveWindow{
 		startSeqno:     block.ID.SeqNo,
 		masterSequence: []PreparedBlock{block},

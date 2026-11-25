@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -96,6 +97,115 @@ func TestPublicReadTransportVersion(t *testing.T) {
 		if peer.readTransport(t.Context()) != quicTransport {
 			t.Fatalf("public peer %d.%d did not choose QUIC", cap.VersionMajor, cap.VersionMinor)
 		}
+	}
+}
+
+func TestPublicQUICColdDownloadsKeepSelectedTransport(t *testing.T) {
+	node := newTestNode(t)
+	node.zeroStateFileHash = make([]byte, PeerIDSize)
+	t.Cleanup(func() { _ = node.quicGateway.Close() })
+	shard := archive.ShardID{Workchain: -1, Shard: topShard}
+	sub, err := node.querySubscriptionForArchive(shard)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	block, _, proof := testPeerMasterBlockProof(t, 170)
+	zero := cell.BeginCell().EndCell().ToBOC()
+	snapshot := bytes.Repeat([]byte{0xaa}, persistentStateChunkSize+7)
+	peer, rldp := testArchiveDownloadPeerWithRLDP(t, "cold-download", 1, nil, 0)
+	modern := Capabilities{VersionMajor: 3, VersionMinor: 3}
+	legacy := Capabilities{VersionMajor: 3, VersionMinor: 2}
+
+	server, err := adnlquic.NewGateway(quicOutboundTestKey(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.SetConnectionHandler(func(remote *adnlquic.Peer) error {
+		remote.SetQueryHandler(func(_ context.Context, payload []byte) ([]byte, error) {
+			var envelope overlay.Query
+			req, err := parseQUICOverlayObject(payload, &envelope)
+			if err != nil {
+				return nil, err
+			}
+			switch req := req.(type) {
+			case PrepareKeyBlockProof:
+				peer.applyCapabilities(legacy)
+				return tl.Serialize(PreparedProofLink{}, true)
+			case DownloadKeyBlockProofLink:
+				return proof, nil
+			case PrepareZeroState, PreparePersistentState:
+				peer.applyCapabilities(legacy)
+				return tl.Serialize(PreparedState{}, true)
+			case DownloadZeroState:
+				return zero, nil
+			case GetPersistentStateSizeV2:
+				return tl.Serialize(PersistentStateSize{Size: int64(len(snapshot))}, true)
+			case DownloadPersistentStateSliceV2:
+				if req.Offset < 0 || req.MaxSize < 1 || req.Offset > int64(len(snapshot))-req.MaxSize {
+					return nil, fmt.Errorf("invalid snapshot range: %d + %d", req.Offset, req.MaxSize)
+				}
+				return snapshot[req.Offset : req.Offset+req.MaxSize], nil
+			default:
+				return nil, fmt.Errorf("unexpected QUIC query %T", req)
+			}
+		})
+		return nil
+	})
+	endpoint := startQUICOutboundTestGateway(t, server)
+	peer.node = node
+	peer.id, err = NewPeerID(server.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer.pub = server.PublicKey()
+	peer.route = newTestPeerRoute(endpoint)
+	peer.publicQUIC = quicPeerQueryTransport{peer: peer, envelope: sub.quicEnvelope}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	peer.applyCapabilities(modern)
+	gotProof, err := sub.downloadProofFromPeer(ctx, peer, block, true, true)
+	if err != nil || !gotProof.Link || !bytes.Equal(gotProof.Data, proof) {
+		t.Fatalf("key block proof: %v", err)
+	}
+
+	session := node.BeginArchiveSession()
+	defer session.Close()
+	pool, err := session.archivePeerPool(sub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !addTestArchiveOnlyPeer(pool, peer) {
+		t.Fatal("could not seed archive peer")
+	}
+	peer.applyCapabilities(modern)
+	gotZero, err := session.downloadZeroStateFromPeer(ctx, sub, pool, shard, peer, block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(gotZero.(*zeroStateSnapshotArtifact).data, zero) {
+		t.Fatal("zero state bytes changed")
+	}
+
+	peer.applyCapabilities(modern)
+	downloader := persistentStateSnapshotDownloader{node: node, sub: sub, block: block, master: block}
+	candidate, err := downloader.preparePersistentStateCandidate(ctx, peer, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, err := downloader.newPersistentStateChunkReader(ctx, *candidate, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	gotSnapshot, err := io.ReadAll(reader)
+	if err != nil || !bytes.Equal(gotSnapshot, snapshot) {
+		t.Fatalf("persistent state snapshot: downloaded %d bytes, err=%v", len(gotSnapshot), err)
+	}
+	usage := rldp.snapshot()
+	if usage.queryCalls != 0 || len(usage.asyncQueries) != 0 {
+		t.Fatal("cold download changed transport between preparation and data")
 	}
 }
 

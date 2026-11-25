@@ -1049,28 +1049,6 @@ func (s *overlaySubscription) queryArchiveInfo(ctx context.Context, transport pe
 	return ArchiveInfo{}, fmt.Errorf("unexpected archive info response %T", resp)
 }
 
-func (s *overlaySubscription) queryArchiveFromPeerWithLimits(ctx context.Context, peer *overlayPeer, req tl.Serializable, timeout time.Duration, maxAnswerSize uint64) (tl.Serializable, error) {
-	queryCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	var resp tl.Serializable
-	if err := peer.queryTransport.Query(queryCtx, maxAnswerSize, req, &resp); err != nil {
-		return nil, err
-	}
-	return resp, nil
-}
-
-func (s *overlaySubscription) queryArchiveRawFromPeerWithLimits(ctx context.Context, peer *overlayPeer, req tl.Serializable, timeout time.Duration, maxAnswerSize uint64) ([]byte, error) {
-	queryCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	answer, err := peer.queryTransport.QueryRaw(queryCtx, maxAnswerSize, req)
-	if err != nil {
-		return nil, err
-	}
-	return answer, nil
-}
-
 func archiveInfoQuery(masterchainSeqno uint32, shard archive.ShardID) tl.Serializable {
 	if shard.IsMasterchain() {
 		return GetArchiveInfo{MasterchainSeqno: int32(masterchainSeqno)}

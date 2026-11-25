@@ -1092,7 +1092,7 @@ func (d persistentStateSnapshotDownloader) stagePersistentStateFile(
 	diskRetained := false
 	defer func() { releaseDisk(diskRetained) }()
 
-	reader, err := d.newPersistentStateChunkReader(ctx, candidate.peer, candidate.id, candidate.size, candidate.workers, chunkLimiter, seed)
+	reader, err := d.newPersistentStateChunkReader(ctx, candidate, chunkLimiter, seed)
 	if err != nil {
 		return nil, err
 	}

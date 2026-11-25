@@ -235,7 +235,8 @@ func TestPersistentStateProbeAcquiresDownloadLease(t *testing.T) {
 		master: block,
 	}
 	candidate := persistentStateCandidate{
-		peer: peer,
+		peer:      peer,
+		transport: peer.queryTransport,
 		id: PersistentStateIDV2{
 			Block:            block,
 			MasterchainBlock: block,

@@ -26,12 +26,9 @@ type persistentStateChunkReader struct {
 	cancel context.CancelFunc
 
 	downloader   persistentStateSnapshotDownloader
+	candidate    persistentStateCandidate
 	node         *Node
-	peer         *overlayPeer
-	id           PersistentStateIDV2
 	blockRef     string
-	size         int64
-	workers      int
 	chunkCount   int64
 	chunkLimiter chan struct{}
 
@@ -54,8 +51,9 @@ type persistentStateChunkReader struct {
 	lastProgressDownloaded int64
 }
 
-func (d persistentStateSnapshotDownloader) newPersistentStateChunkReader(ctx context.Context, peer *overlayPeer, id PersistentStateIDV2, size int64, workers int, chunkLimiter chan struct{}, seed *persistentStateChunkSeed) (*persistentStateChunkReader, error) {
+func (d persistentStateSnapshotDownloader) newPersistentStateChunkReader(ctx context.Context, candidate persistentStateCandidate, chunkLimiter chan struct{}, seed *persistentStateChunkSeed) (*persistentStateChunkReader, error) {
 	n := d.node
+	peer, id, size, workers := candidate.peer, candidate.id, candidate.size, candidate.workers
 
 	chunkCount, err := persistentStateChunkCount(size)
 	if err != nil {
@@ -77,12 +75,9 @@ func (d persistentStateSnapshotDownloader) newPersistentStateChunkReader(ctx con
 		ctx:          ctx,
 		cancel:       cancel,
 		downloader:   d,
+		candidate:    candidate,
 		node:         n,
-		peer:         peer,
-		id:           id,
 		blockRef:     formatPersistentStateBlockRef(d.block, id.EffectiveShard),
-		size:         size,
-		workers:      workers,
 		chunkCount:   chunkCount,
 		chunkLimiter: chunkLimiter,
 		chunks:       make(map[int64]bufferedPersistentStateChunk, bufferedChunks),
@@ -120,7 +115,7 @@ func (d persistentStateSnapshotDownloader) newPersistentStateChunkReader(ctx con
 			Int64("chunk_size_bytes", probeChunkSize).
 			Msg("checking state snapshot availability")
 
-		first := d.downloadPersistentStateChunk(ctx, peer, id, 0, size, chunkLimiter)
+		first := d.downloadPersistentStateChunk(ctx, candidate, 0, chunkLimiter)
 		if first.err != nil {
 			cancel()
 			if !errors.Is(first.err, context.Canceled) {
@@ -166,7 +161,7 @@ func (r *persistentStateChunkReader) Read(dst []byte) (int, error) {
 	if len(dst) == 0 {
 		return 0, nil
 	}
-	if r.readOffset >= r.size {
+	if r.readOffset >= r.candidate.size {
 		return 0, io.EOF
 	}
 	if err := r.waitCurrentChunk(); err != nil {
@@ -189,7 +184,7 @@ func (r *persistentStateChunkReader) Read(dst []byte) (int, error) {
 // prefix capture are byte-identical to draining the reader via Read.
 func (r *persistentStateChunkReader) WriteTo(w io.Writer) (int64, error) {
 	var written int64
-	for r.readOffset < r.size {
+	for r.readOffset < r.candidate.size {
 		if err := r.waitCurrentChunk(); err != nil {
 			return written, err
 		}
@@ -282,22 +277,22 @@ func (r *persistentStateChunkReader) Prefix() []byte {
 
 func (r *persistentStateChunkReader) start() {
 	jobs := make(chan int64)
-	results := make(chan stateChunkResult, r.workers)
+	results := make(chan stateChunkResult, r.candidate.workers)
 	r.results = results
 	r.done = make(chan struct{})
-	r.window = make(chan struct{}, r.workers*persistentStateChunkWindowScale)
+	r.window = make(chan struct{}, r.candidate.workers*persistentStateChunkWindowScale)
 	seeded := make(map[int64]struct{}, len(r.chunks))
 	for idx := range r.chunks {
 		seeded[idx] = struct{}{}
 	}
 
 	var wg sync.WaitGroup
-	for i := 0; i < r.workers; i++ {
+	for i := 0; i < r.candidate.workers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for idx := range jobs {
-				res := r.downloader.downloadPersistentStateChunk(r.ctx, r.peer, r.id, idx, r.size, r.chunkLimiter)
+				res := r.downloader.downloadPersistentStateChunk(r.ctx, r.candidate, idx, r.chunkLimiter)
 				select {
 				case results <- res:
 				case <-r.ctx.Done():
@@ -383,7 +378,7 @@ func (r *persistentStateChunkReader) fail(res stateChunkResult) {
 
 	r.node.log.Error().
 		Err(res.err).
-		Str("peer", r.peer.addr).
+		Str("peer", r.candidate.peer.addr).
 		Str("block", r.blockRef).
 		Int64("offset", res.offset).
 		Int64("chunk_size", res.chunkSize).
@@ -394,11 +389,11 @@ func (r *persistentStateChunkReader) fail(res stateChunkResult) {
 
 func (r *persistentStateChunkReader) logProgress() {
 	now := time.Now()
-	if r.downloaded != r.size && now.Sub(r.lastProgress) < 5*time.Second {
+	if r.downloaded != r.candidate.size && now.Sub(r.lastProgress) < 5*time.Second {
 		return
 	}
 
-	r.node.logDownloadStateProgress(r.peer, r.blockRef, r.downloaded, r.size, r.workers, r.lastProgress, r.lastProgressDownloaded)
+	r.node.logDownloadStateProgress(r.candidate.peer, r.blockRef, r.downloaded, r.candidate.size, r.candidate.workers, r.lastProgress, r.lastProgressDownloaded)
 	r.lastProgress = now
 	r.lastProgressDownloaded = r.downloaded
 }

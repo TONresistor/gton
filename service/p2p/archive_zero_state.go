@@ -195,7 +195,8 @@ func (a *ArchiveSession) downloadZeroStateFromPeer(ctx context.Context, sub *ove
 		query.finish(err)
 	}()
 
-	resp, err := sub.queryArchiveFromPeerWithLimits(ctx, peer, PrepareZeroState{Block: block}, archiveInfoTimeout, persistentStateSmallAnswerMax)
+	transport := peer.readTransport(ctx)
+	resp, err := queryWithTransport(ctx, transport, PrepareZeroState{Block: block}, archiveInfoTimeout, persistentStateSmallAnswerMax)
 	if err != nil {
 		return nil, err
 	}
@@ -211,7 +212,7 @@ func (a *ArchiveSession) downloadZeroStateFromPeer(ctx context.Context, sub *ove
 	pool.recordZeroStateDemandEvidence(block, peer, archivePeerDemandAvailable)
 
 	started := time.Now()
-	data, err := sub.queryArchiveRawFromPeerWithLimits(ctx, peer, DownloadZeroState{Block: block}, archiveSliceTimeout, maxBlockDownloadAnswerSize)
+	data, err := queryRawWithTransport(ctx, transport, DownloadZeroState{Block: block}, archiveSliceTimeout, maxBlockDownloadAnswerSize)
 	if err != nil {
 		return nil, err
 	}

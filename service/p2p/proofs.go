@@ -207,7 +207,8 @@ func (s *overlaySubscription) downloadProofFromPeer(ctx context.Context, peer *o
 		prepare = PrepareKeyBlockProof{Block: block, AllowPartial: allowPartial}
 	}
 
-	resp, err := s.queryFromPeerWithLimits(ctx, peer, prepare, proofPrepareTimeout, maxKeyBlockLookupAnswerSize)
+	transport := peer.readTransport(ctx)
+	resp, err := queryWithTransport(ctx, transport, prepare, proofPrepareTimeout, maxKeyBlockLookupAnswerSize)
 	if err != nil {
 		return ProofDownload{}, err
 	}
@@ -226,17 +227,18 @@ func (s *overlaySubscription) downloadProofFromPeer(ctx context.Context, peer *o
 		return ProofDownload{}, fmt.Errorf("unexpected prepare proof response %T", resp)
 	}
 
-	var data []byte
+	var download tl.Serializable
 	switch {
 	case keyBlock && isLink:
-		data, err = s.queryRawFromPeerWithLimits(ctx, peer, DownloadKeyBlockProofLink{Block: block}, proofDownloadTimeout, maxBlockDownloadAnswerSize)
+		download = DownloadKeyBlockProofLink{Block: block}
 	case keyBlock:
-		data, err = s.queryRawFromPeerWithLimits(ctx, peer, DownloadKeyBlockProof{Block: block}, proofDownloadTimeout, maxBlockDownloadAnswerSize)
+		download = DownloadKeyBlockProof{Block: block}
 	case isLink:
-		data, err = s.queryRawFromPeerWithLimits(ctx, peer, DownloadBlockProofLink{Block: block}, proofDownloadTimeout, maxBlockDownloadAnswerSize)
+		download = DownloadBlockProofLink{Block: block}
 	default:
-		data, err = s.queryRawFromPeerWithLimits(ctx, peer, DownloadBlockProof{Block: block}, proofDownloadTimeout, maxBlockDownloadAnswerSize)
+		download = DownloadBlockProof{Block: block}
 	}
+	data, err := queryRawWithTransport(ctx, transport, download, proofDownloadTimeout, maxBlockDownloadAnswerSize)
 	if err != nil {
 		return ProofDownload{}, err
 	}

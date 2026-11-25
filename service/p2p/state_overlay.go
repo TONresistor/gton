@@ -236,11 +236,11 @@ func (d persistentStateSnapshotDownloader) download(ctx context.Context, splitDe
 	}, nil
 }
 
-func (d persistentStateSnapshotDownloader) preparePersistentState(ctx context.Context, peer *overlayPeer) error {
+func (d persistentStateSnapshotDownloader) preparePersistentState(ctx context.Context, peer *overlayPeer, transport peerQueryTransport) error {
 	n := d.node
 
 	startedAt := time.Now()
-	resp, err := d.sub.queryFromPeerWithLimits(ctx, peer, PreparePersistentState{
+	resp, err := queryWithTransport(ctx, transport, PreparePersistentState{
 		Block:            d.block,
 		MasterchainBlock: d.master,
 	}, persistentStatePrepareTimeout, persistentStateSmallAnswerMax)
@@ -275,6 +275,7 @@ func (d persistentStateSnapshotDownloader) preparePersistentState(ctx context.Co
 
 type persistentStateCandidate struct {
 	peer       *overlayPeer
+	transport  peerQueryTransport
 	id         PersistentStateIDV2
 	size       int64
 	workers    int
@@ -315,13 +316,14 @@ func (d persistentStateSnapshotDownloader) preparePersistentStateCandidate(ctx c
 		}
 	}()
 
+	transport := peer.readTransport(ctx)
 	if effectiveShard == 0 {
 		d.node.log.Debug().
 			Str("peer", peer.addr).
 			Str("block", storage.FormatBlockRef(d.block)).
 			Str("masterchain", storage.FormatBlockRef(d.master)).
 			Msg("preparing persistent state snapshot")
-		if err := d.preparePersistentState(ctx, peer); err != nil {
+		if err := d.preparePersistentState(ctx, peer, transport); err != nil {
 			return nil, err
 		}
 	}
@@ -333,7 +335,7 @@ func (d persistentStateSnapshotDownloader) preparePersistentStateCandidate(ctx c
 	}
 
 	startedAt := time.Now()
-	sizeResp, err := d.sub.queryFromPeerWithLimits(ctx, peer, GetPersistentStateSizeV2{State: id}, persistentStateSizeTimeout, persistentStateSmallAnswerMax)
+	sizeResp, err := queryWithTransport(ctx, transport, GetPersistentStateSizeV2{State: id}, persistentStateSizeTimeout, persistentStateSmallAnswerMax)
 	if err != nil {
 		if !errors.Is(err, context.Canceled) {
 			d.node.log.Debug().
@@ -384,6 +386,7 @@ func (d persistentStateSnapshotDownloader) preparePersistentStateCandidate(ctx c
 
 	return &persistentStateCandidate{
 		peer:       peer,
+		transport:  transport,
 		id:         id,
 		size:       size,
 		workers:    workers,
@@ -1188,7 +1191,7 @@ func (d persistentStateSnapshotDownloader) probePersistentStatePeer(ctx context.
 		go func() {
 			defer wg.Done()
 			for idx := range jobs {
-				res := d.downloadPersistentStateChunk(ctx, candidate.peer, candidate.id, idx, candidate.size, chunkLimiter)
+				res := d.downloadPersistentStateChunk(ctx, candidate, idx, chunkLimiter)
 				select {
 				case results <- res:
 				case <-ctx.Done():
@@ -1301,20 +1304,20 @@ func firstBytesHex(data []byte) string {
 	return hex.EncodeToString(data)
 }
 
-func (d persistentStateSnapshotDownloader) downloadPersistentStateChunk(ctx context.Context, peer *overlayPeer, id PersistentStateIDV2, idx int64, size int64, chunkLimiter chan struct{}) stateChunkResult {
+func (d persistentStateSnapshotDownloader) downloadPersistentStateChunk(ctx context.Context, candidate persistentStateCandidate, idx int64, chunkLimiter chan struct{}) stateChunkResult {
 	n := d.node
 
 	offset := int64(idx) * persistentStateChunkSize
 	chunkSize := int64(persistentStateChunkSize)
-	if left := size - offset; left < chunkSize {
+	if left := candidate.size - offset; left < chunkSize {
 		chunkSize = left
 	}
 
 	var last stateChunkResult
 	for attempt := 1; attempt <= persistentStateChunkRetries; attempt++ {
 		startedAt := time.Now()
-		data, err := queryPersistentStateChunk(ctx, d.sub, peer, DownloadPersistentStateSliceV2{
-			State:   id,
+		data, err := queryPersistentStateChunk(ctx, candidate.transport, DownloadPersistentStateSliceV2{
+			State:   candidate.id,
 			Offset:  offset,
 			MaxSize: chunkSize,
 		}, persistentStateChunkTimeout, uint64(chunkSize+1024), chunkLimiter)
@@ -1336,8 +1339,8 @@ func (d persistentStateSnapshotDownloader) downloadPersistentStateChunk(ctx cont
 
 		n.log.Debug().
 			Err(last.err).
-			Str("peer", peer.addr).
-			Str("block", formatPersistentStateBlockRef(d.block, id.EffectiveShard)).
+			Str("peer", candidate.peer.addr).
+			Str("block", formatPersistentStateBlockRef(d.block, candidate.id.EffectiveShard)).
 			Int64("offset", offset).
 			Int64("chunk_size", chunkSize).
 			Int("attempt", attempt).
@@ -1349,14 +1352,14 @@ func (d persistentStateSnapshotDownloader) downloadPersistentStateChunk(ctx cont
 	return last
 }
 
-func queryPersistentStateChunk(ctx context.Context, sub *overlaySubscription, peer *overlayPeer, req DownloadPersistentStateSliceV2, timeout time.Duration, maxAnswerSize uint64, chunkLimiter chan struct{}) ([]byte, error) {
+func queryPersistentStateChunk(ctx context.Context, transport peerQueryTransport, req DownloadPersistentStateSliceV2, timeout time.Duration, maxAnswerSize uint64, chunkLimiter chan struct{}) ([]byte, error) {
 	release, err := acquirePersistentStateChunkSlot(ctx, chunkLimiter)
 	if err != nil {
 		return nil, err
 	}
 	defer release()
 
-	return sub.queryRawFromPeerWithLimits(ctx, peer, req, timeout, maxAnswerSize)
+	return queryRawWithTransport(ctx, transport, req, timeout, maxAnswerSize)
 }
 
 func acquirePersistentStateChunkSlot(ctx context.Context, chunkLimiter chan struct{}) (func(), error) {

@@ -794,8 +794,9 @@ func (p *archivePeerPool) reserveTransientRandomExpansion(peerID PeerID, now tim
 
 func (p *archivePeerPool) probeArchivePeerEvidence(ctx context.Context, peer *overlayPeer, probe archivePeerProbe) (archivePeerProbeResult, error) {
 	result := archivePeerProbeResult{probe: probe}
+	transport := peer.readTransport(ctx)
 	if probe.zeroState {
-		resp, err := p.sub.queryArchiveFromPeerWithLimits(ctx, peer, PrepareZeroState{Block: probe.block}, archiveInfoTimeout, persistentStateSmallAnswerMax)
+		resp, err := queryWithTransport(ctx, transport, PrepareZeroState{Block: probe.block}, archiveInfoTimeout, persistentStateSmallAnswerMax)
 		if err != nil {
 			return archivePeerProbeResult{}, err
 		}
@@ -811,7 +812,6 @@ func (p *archivePeerPool) probeArchivePeerEvidence(ctx context.Context, peer *ov
 		}
 	}
 
-	transport := peer.readTransport(ctx)
 	info, err := p.sub.queryArchiveInfo(ctx, transport, probe.seqno, probe.shard, archiveInfoTimeout)
 	if err != nil {
 		return archivePeerProbeResult{}, err

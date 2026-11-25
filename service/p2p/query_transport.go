@@ -306,6 +306,23 @@ func (p *overlayPeer) queryPublicPeerControl(ctx context.Context, req, result tl
 	return p.overlay.Query(ctx, req, result)
 }
 
+func queryWithTransport(ctx context.Context, transport peerQueryTransport, req tl.Serializable, timeout time.Duration, maxAnswerSize uint64) (tl.Serializable, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	var resp tl.Serializable
+	if err := transport.Query(queryCtx, maxAnswerSize, req, &resp); err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+func queryRawWithTransport(ctx context.Context, transport peerQueryTransport, req tl.Serializable, timeout time.Duration, maxAnswerSize uint64) ([]byte, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return transport.QueryRaw(queryCtx, maxAnswerSize, req)
+}
+
 func parsePeerQueryAnswer(result tl.Serializable, answer []byte) error {
 	rest, err := tl.ParseNoCopy(result, answer, true)
 	if err != nil {

@@ -571,17 +571,6 @@ func (s *overlaySubscription) handlePeerQueryFailure(peer *overlayPeer, err erro
 	s.markPeerQueryFailed(peer)
 }
 
-func (s *overlaySubscription) queryRawFromPeerWithLimits(ctx context.Context, peer *overlayPeer, req tl.Serializable, timeout time.Duration, maxAnswerSize uint64) ([]byte, error) {
-	queryCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	answer, err := peer.queryTransport.QueryRaw(queryCtx, maxAnswerSize, req)
-	if err != nil {
-		return nil, err
-	}
-	return answer, nil
-}
-
 func (s *overlaySubscription) downloadFullFromPeers(ctx context.Context, requested ton.BlockIDExt, peers []*overlayPeer, req tl.Serializable) (*DownloadedBlock, error) {
 	downloaded, err := runConcurrentBlockDownloads(ctx, peers, blockDownloadParallelism(peers), func(peer *overlayPeer, err error) {
 		s.noteChainBlockDownloadFailure(requested, peer, err)

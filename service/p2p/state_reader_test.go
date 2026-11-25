@@ -29,9 +29,8 @@ func newChunkReaderForTest(t *testing.T, chunks [][]byte, size int64) *persisten
 		ctx:          ctx,
 		cancel:       cancel,
 		node:         &Node{log: zerolog.Nop()},
-		peer:         &overlayPeer{addr: "test-peer"},
+		candidate:    persistentStateCandidate{peer: &overlayPeer{addr: "test-peer"}, size: size},
 		blockRef:     "test-block",
-		size:         size,
 		chunkCount:   int64(len(chunks)),
 		chunks:       make(map[int64]bufferedPersistentStateChunk),
 		window:       make(chan struct{}, len(chunks)),
@@ -226,10 +225,7 @@ func TestPersistentStateChunkReaderBoundsConcurrentBuffering(t *testing.T) {
 	downloader, peer, id := testPersistentStateChunkDownloader(rldpClient)
 	reader, err := downloader.newPersistentStateChunkReader(
 		context.Background(),
-		peer,
-		id,
-		chunks*persistentStateChunkSize,
-		workers,
+		persistentStateCandidate{peer: peer, transport: peer.queryTransport, id: id, size: chunks * persistentStateChunkSize, workers: workers},
 		nil,
 		nil,
 	)
@@ -291,10 +287,7 @@ func TestPersistentStateChunkReaderMaxInt64UsesBoundedState(t *testing.T) {
 	downloader, peer, id := testPersistentStateChunkDownloader(rldpClient)
 	reader, err := downloader.newPersistentStateChunkReader(
 		context.Background(),
-		peer,
-		id,
-		math.MaxInt64,
-		workers,
+		persistentStateCandidate{peer: peer, transport: peer.queryTransport, id: id, size: math.MaxInt64, workers: workers},
 		nil,
 		nil,
 	)

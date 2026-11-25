@@ -174,9 +174,9 @@ func (s *overlaySubscription) exchangeRandomPeers(ctx context.Context, peer *ove
 
 	startedAt := time.Now()
 	var res overlay.NodesList
-	err = peer.overlay.Query(queryCtx, overlay.GetRandomPeers{
+	err = peer.queryPublicPeerControl(queryCtx, overlay.GetRandomPeers{
 		List: advertised,
-	}, &res)
+	}, &res, publicPeerGossipMaxSize)
 	if err != nil {
 		s.handlePeerQueryFailure(peer, err)
 		s.log.Debug().
@@ -260,7 +260,7 @@ func (s *overlaySubscription) pingPeer(ctx context.Context, peer *overlayPeer) {
 
 	startedAt := time.Now()
 	var res Capabilities
-	if err := peer.overlay.Query(queryCtx, GetCapabilities{}, &res); err != nil {
+	if err := peer.queryPublicPeerControl(queryCtx, GetCapabilities{}, &res, publicCapabilitiesMaxSize); err != nil {
 		s.handlePeerQueryFailure(peer, err)
 		s.log.Debug().
 			Err(err).

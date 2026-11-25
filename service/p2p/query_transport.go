@@ -17,6 +17,14 @@ type peerQueryTransport interface {
 	QueryRaw(ctx context.Context, maxAnswerSize uint64, req tl.Serializable) ([]byte, error)
 }
 
+const (
+	publicQUICVersionMajor    = 3
+	publicQUICVersionMinor    = 3
+	publicQUICProbeTimeout    = 500 * time.Millisecond
+	publicCapabilitiesMaxSize = 1024
+	publicPeerGossipMaxSize   = 4096
+)
+
 type quicOverlayEnvelope struct {
 	overlayID PeerID
 	state     atomic.Pointer[quicOverlayEnvelopeState]
@@ -258,7 +266,7 @@ func (p *overlayPeer) readTransport(ctx context.Context) peerQueryTransport {
 		major, minor = p.versionMajor, p.versionMinor
 		p.statsMx.Unlock()
 	}
-	if peerEligibleVersion(major, minor, 3, 3) {
+	if peerEligibleVersion(major, minor, publicQUICVersionMajor, publicQUICVersionMinor) {
 		return p.publicQUIC
 	}
 	return p.queryTransport
@@ -266,20 +274,36 @@ func (p *overlayPeer) readTransport(ctx context.Context) peerQueryTransport {
 
 func (p *overlayPeer) probePublicReadCapabilities(ctx context.Context) {
 	var cap Capabilities
-	probeCtx, cancel := context.WithTimeout(ctx, 350*time.Millisecond)
-	err := p.overlay.Query(probeCtx, GetCapabilities{}, &cap)
-	cancel()
-	if err == nil && cap.VersionMajor > 0 && cap.VersionMinor >= 0 {
-		p.applyCapabilities(cap)
-		return
-	}
-
-	probeCtx, cancel = context.WithTimeout(ctx, 500*time.Millisecond)
+	probeCtx, cancel := context.WithTimeout(ctx, publicQUICProbeTimeout+350*time.Millisecond)
 	defer cancel()
-	if err := p.publicQUIC.Query(probeCtx, 1024, GetCapabilities{}, &cap); err == nil &&
+	if err := p.queryPublicPeerControl(probeCtx, GetCapabilities{}, &cap, publicCapabilitiesMaxSize); err == nil &&
 		cap.VersionMajor > 0 && cap.VersionMinor >= 0 {
 		p.applyCapabilities(cap)
 	}
+}
+
+func (p *overlayPeer) queryPublicPeerControl(ctx context.Context, req, result tl.Serializable, maxAnswerSize uint64) error {
+	if p.publicQUIC == nil {
+		return p.overlay.Query(ctx, req, result)
+	}
+
+	p.statsMx.Lock()
+	major, minor := p.versionMajor, p.versionMinor
+	p.statsMx.Unlock()
+	if peerEligibleVersion(major, minor, publicQUICVersionMajor, publicQUICVersionMinor) {
+		return p.publicQUIC.Query(ctx, maxAnswerSize, req, result)
+	}
+	if major != 0 {
+		return p.overlay.Query(ctx, req, result)
+	}
+
+	probeCtx, cancel := context.WithTimeout(ctx, publicQUICProbeTimeout)
+	err := p.publicQUIC.Query(probeCtx, maxAnswerSize, req, result)
+	cancel()
+	if err == nil || ctx.Err() != nil {
+		return err
+	}
+	return p.overlay.Query(ctx, req, result)
 }
 
 func parsePeerQueryAnswer(result tl.Serializable, answer []byte) error {

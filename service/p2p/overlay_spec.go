@@ -78,13 +78,6 @@ func buildOverlaySpec(zeroStateFileHash []byte, workchain int32, shard int64, na
 		return overlaySpec{}, err
 	}
 
-	protoMajor := int32(shardchainProtoVersionMajor)
-	protoMinor := int32(shardchainProtoVersionMinor)
-	if workchain == -1 {
-		protoMajor = int32(masterchainProtoVersionMajor)
-		protoMinor = int32(masterchainProtoVersionMinor)
-	}
-
 	return overlaySpec{
 		Name:              name,
 		Kind:              overlayKindPublicShard,
@@ -92,8 +85,8 @@ func buildOverlaySpec(zeroStateFileHash []byte, workchain int32, shard int64, na
 		Shard:             shard,
 		FullID:            fullID,
 		ShortID:           shortID,
-		ProtoVersionMajor: protoMajor,
-		ProtoVersionMinor: protoMinor,
+		ProtoVersionMajor: publicQUICVersionMajor,
+		ProtoVersionMinor: publicQUICVersionMinor,
 		Announce:          true,
 		RandomPeers:       true,
 		QueryCapabilities: true,

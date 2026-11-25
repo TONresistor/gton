@@ -21,6 +21,65 @@ import (
 	"github.com/xssnick/tonutils-go/tvm/cell"
 )
 
+func TestPublicOverlayQUICAdmissionAndPeerExchange(t *testing.T) {
+	server := newTestNode(t)
+	server.quicGateway.SetConnectionHandler(server.handleInboundQUICPeer)
+	endpoint := startQUICOutboundTestGateway(t, server.quicGateway)
+	client := newTestNode(t)
+	t.Cleanup(func() { _ = client.quicGateway.Close() })
+
+	for _, workchain := range []int32{-1, 0} {
+		spec, err := buildOverlaySpec(make([]byte, PeerIDSize), workchain, topShard, "public")
+		if err != nil {
+			t.Fatal(err)
+		}
+		serverSub := testOverlaySubscription(&overlaySubscription{node: server, spec: spec, log: discardLogger()})
+		server.subscriptionsMx.Lock()
+		server.subscriptions[string(spec.ShortID)] = serverSub
+		server.subscriptionsMx.Unlock()
+
+		sub := testOverlaySubscription(&overlaySubscription{node: client, spec: spec})
+		wrapper, adnl := newTestOverlayWrapper()
+		adnl.queryResponder = func(req tl.Serializable, result tl.Serializable) error {
+			t.Errorf("workchain %d used ADNL control query: %T", workchain, testOverlayQueryPayload(req))
+			return context.DeadlineExceeded
+		}
+		peer := &overlayPeer{
+			node: client, id: server.localID, pub: server.quicGateway.PublicKey(),
+			overlay: wrapper, route: newTestPeerRoute(endpoint),
+		}
+		peer.publicQUIC = quicPeerQueryTransport{peer: peer, envelope: sub.quicEnvelope}
+
+		sub.pingPeer(t.Context(), peer)
+		cap := peer.statsSnapshot()
+		if cap.versionMajor != 3 || cap.versionMinor != 3 {
+			t.Fatalf("workchain %d answered %d.%d, want admission-compatible 3.3", workchain, cap.versionMajor, cap.versionMinor)
+		}
+
+		var peers overlay.NodesList
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		err = peer.queryPublicPeerControl(ctx, overlay.GetRandomPeers{}, &peers, publicPeerGossipMaxSize)
+		cancel()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(peers.List) != 1 || !bytes.Equal(peers.List[0].Overlay, spec.ShortID) || peers.List[0].CheckSignature() != nil {
+			t.Fatalf("workchain %d did not return a signed public peer descriptor", workchain)
+		}
+
+		peer.applyCapabilities(Capabilities{VersionMajor: 3, VersionMinor: 2})
+		adnl.queryResponder = func(req tl.Serializable, result tl.Serializable) error {
+			*result.(*Capabilities) = Capabilities{VersionMajor: 3, VersionMinor: 2, Flags: 1}
+			return nil
+		}
+		sub.pingPeer(t.Context(), peer)
+		cap = peer.statsSnapshot()
+		if cap.versionMajor != 3 || cap.versionMinor != 2 || cap.capabilitiesFlags != 1 {
+			t.Fatal("legacy peer did not use ADNL for capability discovery")
+		}
+	}
+}
+
 func TestPublicReadTransportVersion(t *testing.T) {
 	peer, _ := testArchiveDownloadPeerWithRLDP(t, "legacy", 1, nil, 0)
 	quicPeer, _ := testArchiveDownloadPeerWithRLDP(t, "new", 1, nil, 0)

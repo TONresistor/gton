@@ -712,7 +712,7 @@ func (p *archivePeerPool) exchangeTransientRandomPeers(ctx context.Context, peer
 
 	p.scoutStats.transientRandomQueries.Add(1)
 	var res overlay.NodesList
-	if err = peer.overlay.Query(queryCtx, overlay.GetRandomPeers{List: advertised}, &res); err != nil {
+	if err = peer.queryPublicPeerControl(queryCtx, overlay.GetRandomPeers{List: advertised}, &res, publicPeerGossipMaxSize); err != nil {
 		p.log.Debug().
 			Err(err).
 			Str("peer", peer.addr).

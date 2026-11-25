@@ -717,11 +717,40 @@ func (s *overlaySubscription) rebroadcastToPeer(ctx context.Context, peer *overl
 		}
 	}
 
+	target = s.publicExternalBroadcastTransport(ctx, peer, req, target)
+	if target == nil {
+		return false
+	}
+
 	plan := s.rebroadcastPlan(req.kind, payloadLen)
 	if plan.mode == rebroadcastModeSimple {
 		return s.rebroadcastSimpleToPeer(ctx, peer, target, req, plan)
 	}
 	return s.rebroadcastFECToPeer(ctx, peer, target, req, plan)
+}
+
+func (s *overlaySubscription) publicExternalBroadcastTransport(ctx context.Context, peer *overlayPeer, req rebroadcastRequest, fallback overlay.BroadcastPeer) overlay.BroadcastPeer {
+	if req.kind != "tonNode.externalMessageBroadcast" || !s.spec.usesVersionedReadTransport() || peer.publicQUIC == nil ||
+		!peerEligible(peer.statsSnapshot(), publicQUICVersionMajor, publicQUICVersionMinor) {
+		return fallback
+	}
+
+	route := quicRouteBroadcastPeer{peer: peer, envelope: s.quicEnvelope}
+	var err error
+	if req.local {
+		waitCtx, cancel := context.WithTimeout(ctx, publicQUICProbeTimeout)
+		route.connected, err = (quicLocalBroadcastPeer{route: route}).connection(waitCtx)
+		cancel()
+	} else {
+		route.connected, err = route.outbound()
+	}
+	if ctx.Err() != nil || req.expiredInQueue(time.Now()) {
+		return nil
+	}
+	if err != nil {
+		return fallback
+	}
+	return route
 }
 
 func (s *overlaySubscription) rebroadcastSimpleToPeer(

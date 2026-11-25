@@ -72,8 +72,9 @@ type quicBroadcastSource struct {
 // quicLocalBroadcastPeer; this node's validator candidate goes out through
 // quicPriorityBroadcastPeer. A vote's short delivery deadline never owns a dial.
 type quicRouteBroadcastPeer struct {
-	peer     *overlayPeer
-	envelope *quicOverlayEnvelope
+	peer      *overlayPeer
+	envelope  *quicOverlayEnvelope
+	connected *adnlquic.Peer
 }
 
 var _ overlay.BroadcastPeer = quicBroadcastSource{}
@@ -127,11 +128,9 @@ func (p quicRouteBroadcastPeer) ID() []byte {
 // rather than mistaking it for a delivery; dropping relayed parts for an
 // unreachable peer is acceptable FEC redundancy loss.
 //
-// Every write through this type is relay traffic - somebody else's broadcast
-// forwarded to the peer - and defers to this node's own candidate symbol in
+// Writes through this type defer to this node's own candidate symbol in
 // flight to the same peer (see quicPrioritySendLatch); the candidate itself
-// goes out through quicPriorityBroadcastPeer and this node's other broadcasts
-// through quicLocalBroadcastPeer.
+// goes out through quicPriorityBroadcastPeer.
 func (p quicRouteBroadcastPeer) SendCustomMessage(ctx context.Context, req tl.Serializable) error {
 	peer, err := p.outbound()
 	if err != nil {
@@ -153,6 +152,9 @@ func (p quicRouteBroadcastPeer) SendPreparedCustomMessage(ctx context.Context, b
 // outbound is the live outbound connection to the peer or errQUICPeerOffline
 // with a background dial requested; it never waits on anything.
 func (p quicRouteBroadcastPeer) outbound() (*adnlquic.Peer, error) {
+	if p.connected != nil {
+		return p.connected, nil
+	}
 	peer, err := p.peer.node.quicGateway.OutboundPeerDefaultID(p.peer.id[:])
 	if err != nil {
 		p.peer.quicPath().requestBackgroundQUICDial()

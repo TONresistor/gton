@@ -10,7 +10,9 @@ import (
 	"testing"
 	"time"
 
+	tonnodeapi "github.com/xssnick/tonutils-go/adnl/node"
 	"github.com/xssnick/tonutils-go/adnl/overlay"
+	adnlquic "github.com/xssnick/tonutils-go/adnl/quic"
 	"github.com/xssnick/tonutils-go/tl"
 )
 
@@ -30,6 +32,121 @@ func (m *mockRebroadcastPeer) SendCustomMessage(_ context.Context, req tl.Serial
 		m.afterSend(len(m.sent))
 	}
 	return nil
+}
+
+func TestPublicExternalMessageRebroadcastTransport(t *testing.T) {
+	node := newTestNode(t)
+	t.Cleanup(func() { _ = node.quicGateway.Close() })
+	runCtx, stop := context.WithCancel(t.Context())
+	node.runCtx = runCtx
+	t.Cleanup(func() {
+		stop()
+		node.wg.Wait()
+	})
+	spec, err := buildOverlaySpec(make([]byte, PeerIDSize), 0, topShard, "basechain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sub := testOverlaySubscription(&overlaySubscription{node: node, spec: spec, log: discardLogger()})
+
+	receiver, err := overlay.NewBroadcastReceiver(spec.ShortID, maxOverlayPayloadSize, true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(receiver.Close)
+	type receivedBroadcast struct {
+		wire tl.Serializable
+		info overlay.BroadcastInfo
+	}
+	received := make(chan receivedBroadcast, 4)
+	receiver.SetBroadcastHandlerWithInfo(func(wire tl.Serializable, info overlay.BroadcastInfo) overlay.BroadcastDisposition {
+		received <- receivedBroadcast{wire, info}
+		return overlay.BroadcastDispositionAcceptAndRelay
+	})
+	server, err := adnlquic.NewGateway(quicOutboundTestKey(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.SetConnectionHandler(func(remote *adnlquic.Peer) error {
+		remote.SetMessageHandler(func(_ context.Context, payload []byte) {
+			var header overlay.Message
+			msg, err := parseQUICOverlayObject(payload, &header)
+			if err != nil || !bytes.Equal(header.Overlay, spec.ShortID) {
+				t.Errorf("QUIC broadcast envelope: %v", err)
+				return
+			}
+			if err := receiver.HandleMessage(quicBroadcastSource{id: &node.localID}, msg); err != nil {
+				t.Errorf("receive QUIC broadcast: %v", err)
+			}
+		})
+		return nil
+	})
+	endpoint := startQUICOutboundTestGateway(t, server)
+	peerID := peerIDForQUICOutboundTest(t, server.PublicKey())
+	localADNL := &mockRebroadcastPeer{id: peerID[:]}
+	relayADNL := &mockRebroadcastPeer{id: peerID[:]}
+	peer := &overlayPeer{
+		node: node, id: peerID, pub: server.PublicKey(), route: newTestPeerRoute(endpoint),
+		broadcastPeer: relayADNL, localBroadcastPeer: localADNL,
+		prioritySend: &quicPrioritySendLatch{},
+	}
+	peer.publicQUIC = quicPeerQueryTransport{peer: peer, envelope: sub.quicEnvelope}
+	peer.applyCapabilities(Capabilities{VersionMajor: 3, VersionMinor: 4})
+
+	for _, test := range []struct {
+		size int
+		mode overlay.BroadcastDelivery
+	}{
+		{size: 80, mode: overlay.BroadcastDeliverySimple},
+		{size: 2000, mode: overlay.BroadcastDeliveryFEC},
+	} {
+		data := bytes.Repeat([]byte{0xa5}, test.size)
+		wire, err := tl.Serialize(tonnodeapi.NewExternalMessageBroadcast{Message: tonnodeapi.ExternalMessage{Data: data}}, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := rebroadcastRequest{kind: "tonNode.externalMessageBroadcast", payload: wire, local: true}
+		if !sub.rebroadcastToPeer(t.Context(), peer, req) {
+			t.Fatal("modern peer did not accept the broadcast write")
+		}
+		select {
+		case got := <-received:
+			broadcast, ok := got.wire.(tonnodeapi.NewExternalMessageBroadcast)
+			if !ok || !bytes.Equal(broadcast.Message.Data, data) || got.info.Delivery != test.mode {
+				t.Fatalf("unexpected received broadcast %T with delivery %v", got.wire, got.info.Delivery)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("QUIC peer did not receive the broadcast")
+		}
+	}
+	if len(localADNL.sent) != 0 || len(relayADNL.sent) != 0 {
+		t.Fatal("a modern peer received both transports")
+	}
+
+	payload, err := tl.Serialize(tonnodeapi.NewExternalMessageBroadcast{Message: tonnodeapi.ExternalMessage{Data: []byte{1}}}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := rebroadcastRequest{kind: "tonNode.externalMessageBroadcast", payload: payload, local: true}
+	peer.applyCapabilities(Capabilities{VersionMajor: 3, VersionMinor: 2})
+	if !sub.rebroadcastToPeer(t.Context(), peer, req) || len(localADNL.sent) != 1 || len(relayADNL.sent) != 0 {
+		t.Fatal("legacy peer did not receive ADNL")
+	}
+
+	coldID := testPeerID("unavailable-quic-route")
+	cold := &overlayPeer{
+		node: node, id: coldID, route: newTestPeerRoute(""),
+		broadcastPeer: relayADNL, localBroadcastPeer: localADNL,
+		publicQUIC: peer.publicQUIC,
+	}
+	cold.applyCapabilities(Capabilities{VersionMajor: 3, VersionMinor: 4})
+	if !sub.rebroadcastToPeer(t.Context(), cold, req) || len(localADNL.sent) != 2 || len(relayADNL.sent) != 0 {
+		t.Fatal("unavailable QUIC route did not fall back before sending")
+	}
+	req.local = false
+	if !sub.rebroadcastToPeer(t.Context(), cold, req) || len(relayADNL.sent) != 1 || len(localADNL.sent) != 2 {
+		t.Fatal("relayed broadcast did not use the relay fallback")
+	}
 }
 
 func TestPlanRebroadcastMatchesCppNodeRouting(t *testing.T) {

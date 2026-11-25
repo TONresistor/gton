@@ -385,7 +385,7 @@ func (s *overlaySubscription) newOverlayPeer(pooled *pooledPeer, announced *over
 		}
 		peer.broadcastPeer = peer.overlay
 		peer.localBroadcastPeer = peer.overlay
-		if s.spec.usesVersionedReadTransport() {
+		if s.spec.usesVersionedReadTransport() && s.node.quicGateway != nil {
 			peer.publicQUIC = quicPeerQueryTransport{peer: peer, envelope: s.quicEnvelope}
 		}
 	}

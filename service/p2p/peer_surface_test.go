@@ -696,14 +696,14 @@ func TestHandleGetRandomPeersIncludesSelfForClientNode(t *testing.T) {
 	}
 }
 
-func TestBuildOverlaySpecUsesCppNodeProtoVersions(t *testing.T) {
+func TestBuildOverlaySpecAdvertisesPublicQUICVersion(t *testing.T) {
 	zeroHash := make([]byte, 32)
 
 	master, err := buildOverlaySpec(zeroHash, -1, topShard, "masterchain")
 	if err != nil {
 		t.Fatalf("build master overlay spec: %v", err)
 	}
-	if master.ProtoVersionMajor != 3 || master.ProtoVersionMinor != 2 {
+	if master.ProtoVersionMajor != 3 || master.ProtoVersionMinor != 3 {
 		t.Fatalf("unexpected master proto version %d.%d", master.ProtoVersionMajor, master.ProtoVersionMinor)
 	}
 
@@ -711,7 +711,7 @@ func TestBuildOverlaySpecUsesCppNodeProtoVersions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build base overlay spec: %v", err)
 	}
-	if base.ProtoVersionMajor != 3 || base.ProtoVersionMinor != 2 {
+	if base.ProtoVersionMajor != 3 || base.ProtoVersionMinor != 3 {
 		t.Fatalf("unexpected base proto version %d.%d", base.ProtoVersionMajor, base.ProtoVersionMinor)
 	}
 }

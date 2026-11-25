@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -14,6 +16,7 @@ import (
 	"time"
 
 	"github.com/xssnick/gton/service/archive"
+	adnladdr "github.com/xssnick/tonutils-go/adnl/address"
 	tonnodeapi "github.com/xssnick/tonutils-go/adnl/node"
 	"github.com/xssnick/tonutils-go/adnl/overlay"
 	adnlquic "github.com/xssnick/tonutils-go/adnl/quic"
@@ -22,12 +25,87 @@ import (
 	"github.com/xssnick/tonutils-go/tvm/cell"
 )
 
+func newPublicQUICQueryTestNode(t *testing.T) *Node {
+	t.Helper()
+	node := newTestNode(t)
+	node.runCtx = t.Context()
+	t.Cleanup(func() {
+		node.wg.Wait()
+		_ = node.quicGateway.Close()
+	})
+	return node
+}
+
+func TestPublicQUICCapabilityTimeoutDoesNotAbortSharedDial(t *testing.T) {
+	node := newPublicQUICQueryTestNode(t)
+	spec, err := buildOverlaySpec(make([]byte, PeerIDSize), -1, topShard, "masterchain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sub := testOverlaySubscription(&overlaySubscription{node: node, spec: spec, log: discardLogger()})
+	server, err := adnlquic.NewGateway(quicOutboundTestKey(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	modern := Capabilities{VersionMajor: 3, VersionMinor: 4}
+	server.SetConnectionHandler(func(remote *adnlquic.Peer) error {
+		remote.SetQueryHandler(func(_ context.Context, payload []byte) ([]byte, error) {
+			var envelope overlay.Query
+			req, err := parseQUICOverlayObject(payload, &envelope)
+			if err != nil {
+				return nil, err
+			}
+			if _, ok := req.(GetCapabilities); !ok || !bytes.Equal(envelope.Overlay, spec.ShortID) {
+				return nil, fmt.Errorf("unexpected QUIC query %T", req)
+			}
+			return tl.Serialize(modern, true)
+		})
+		return nil
+	})
+	endpoint := netip.MustParseAddrPort(startQUICOutboundTestGateway(t, server))
+	dht := &blockingOutboundRouteDHT{
+		started: make(chan struct{}), release: make(chan struct{}), pub: server.PublicKey(),
+		addresses: &adnladdr.List{ExpireAt: int32(time.Now().Add(time.Hour).Unix()), Addresses: []adnladdr.Address{
+			adnladdr.QUIC{IP: net.IP(endpoint.Addr().AsSlice()), Port: int32(endpoint.Port())},
+		}},
+	}
+	node.dht = dht
+	wrapper, legacy := newTestOverlayWrapper()
+	legacy.queryResponder = func(_ tl.Serializable, result tl.Serializable) error {
+		*result.(*Capabilities) = modern
+		return nil
+	}
+	peer := &overlayPeer{
+		node: node, id: peerIDForQUICOutboundTest(t, server.PublicKey()), pub: server.PublicKey(),
+		route: newTestPeerRoute(""), overlay: wrapper,
+	}
+	peer.publicQUIC = quicPeerQueryTransport{peer: peer, envelope: sub.quicEnvelope, sharedDial: true}
+
+	peer.probePublicReadCapabilities(t.Context())
+	if stats := peer.statsSnapshot(); stats.versionMajor != modern.VersionMajor || stats.versionMinor != modern.VersionMinor {
+		t.Fatal("timed-out probe did not read capabilities over ADNL")
+	}
+	if !peer.route.QUICDialInFlight() || peer.route.QUICDialFailing() {
+		t.Fatal("short probe changed the verdict of the shared QUIC dial")
+	}
+	close(dht.release)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	var cap Capabilities
+	if err := peer.readTransport(ctx).Query(ctx, publicCapabilitiesMaxSize, GetCapabilities{}, &cap); err != nil {
+		t.Fatal(err)
+	}
+	if cap != modern || dht.calls.Load() != 1 {
+		t.Fatalf("shared QUIC dial: capabilities=%+v, DHT calls=%d", cap, dht.calls.Load())
+	}
+}
+
 func TestPublicOverlayQUICAdmissionAndPeerExchange(t *testing.T) {
 	server := newTestNode(t)
 	server.quicGateway.SetConnectionHandler(server.handleInboundQUICPeer)
 	endpoint := startQUICOutboundTestGateway(t, server.quicGateway)
-	client := newTestNode(t)
-	t.Cleanup(func() { _ = client.quicGateway.Close() })
+	client := newPublicQUICQueryTestNode(t)
 
 	for _, workchain := range []int32{-1, 0} {
 		spec, err := buildOverlaySpec(make([]byte, PeerIDSize), workchain, topShard, "public")
@@ -49,7 +127,7 @@ func TestPublicOverlayQUICAdmissionAndPeerExchange(t *testing.T) {
 			node: client, id: server.localID, pub: server.quicGateway.PublicKey(),
 			overlay: wrapper, route: newTestPeerRoute(endpoint),
 		}
-		peer.publicQUIC = quicPeerQueryTransport{peer: peer, envelope: sub.quicEnvelope}
+		peer.publicQUIC = quicPeerQueryTransport{peer: peer, envelope: sub.quicEnvelope, sharedDial: true}
 
 		sub.pingPeer(t.Context(), peer)
 		cap := peer.statsSnapshot()
@@ -84,7 +162,7 @@ func TestPublicOverlayQUICAdmissionAndPeerExchange(t *testing.T) {
 func TestPublicReadTransportVersion(t *testing.T) {
 	peer, _ := testArchiveDownloadPeerWithRLDP(t, "legacy", 1, nil, 0)
 	quicPeer, _ := testArchiveDownloadPeerWithRLDP(t, "new", 1, nil, 0)
-	quicTransport := &quicPeerQueryTransport{peer: quicPeer}
+	quicTransport := &quicPeerQueryTransport{peer: quicPeer, sharedDial: true}
 	peer.publicQUIC = quicTransport
 	peer.applyCapabilities(Capabilities{VersionMajor: 3, VersionMinor: 2})
 	if _, ok := peer.readTransport(t.Context()).(rldpPeerQueryTransport); !ok {
@@ -101,9 +179,8 @@ func TestPublicReadTransportVersion(t *testing.T) {
 }
 
 func TestPublicQUICColdDownloadsKeepSelectedTransport(t *testing.T) {
-	node := newTestNode(t)
+	node := newPublicQUICQueryTestNode(t)
 	node.zeroStateFileHash = make([]byte, PeerIDSize)
-	t.Cleanup(func() { _ = node.quicGateway.Close() })
 	shard := archive.ShardID{Workchain: -1, Shard: topShard}
 	sub, err := node.querySubscriptionForArchive(shard)
 	if err != nil {
@@ -160,7 +237,7 @@ func TestPublicQUICColdDownloadsKeepSelectedTransport(t *testing.T) {
 	}
 	peer.pub = server.PublicKey()
 	peer.route = newTestPeerRoute(endpoint)
-	peer.publicQUIC = quicPeerQueryTransport{peer: peer, envelope: sub.quicEnvelope}
+	peer.publicQUIC = quicPeerQueryTransport{peer: peer, envelope: sub.quicEnvelope, sharedDial: true}
 
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
@@ -230,9 +307,8 @@ func TestPublicQUICReplayIncidentDownloads(t *testing.T) {
 	rootHash, fileHash := root.HashKey(), sha256.Sum256(blockBOC)
 	block := ton.BlockIDExt{Workchain: 0, Shard: topShard, SeqNo: 111923229, RootHash: rootHash[:], FileHash: fileHash[:]}
 
-	node := newTestNode(t)
+	node := newPublicQUICQueryTestNode(t)
 	node.zeroStateFileHash = make([]byte, 32)
-	t.Cleanup(func() { _ = node.quicGateway.Close() })
 	shard := archive.ShardID{Workchain: 0, Shard: topShard}
 	sub, err := node.querySubscriptionForArchive(shard)
 	if err != nil {
@@ -292,7 +368,7 @@ func TestPublicQUICReplayIncidentDownloads(t *testing.T) {
 	}
 	peer.pub = server.PublicKey()
 	peer.route = newTestPeerRoute(endpoint)
-	peer.publicQUIC = &quicPeerQueryTransport{peer: peer, envelope: sub.quicEnvelope}
+	peer.publicQUIC = &quicPeerQueryTransport{peer: peer, envelope: sub.quicEnvelope, sharedDial: true}
 	var adnl *testOverlayADNL
 	peer.overlay, adnl = newTestOverlayWrapper()
 	adnl.queryResponder = func(req tl.Serializable, result tl.Serializable) error {

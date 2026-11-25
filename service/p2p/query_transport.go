@@ -42,8 +42,9 @@ type rldpPeerQueryTransport struct {
 }
 
 type quicPeerQueryTransport struct {
-	peer     *overlayPeer
-	envelope *quicOverlayEnvelope
+	peer       *overlayPeer
+	envelope   *quicOverlayEnvelope
+	sharedDial bool
 }
 
 var _ peerQueryTransport = rldpPeerQueryTransport{}
@@ -231,7 +232,11 @@ func (t quicPeerQueryTransport) QueryRaw(
 	maxAnswerSize uint64,
 	req tl.Serializable,
 ) ([]byte, error) {
-	peer, err := t.peer.dialQUIC(ctx)
+	dial := t.peer.dialQUIC
+	if t.sharedDial {
+		dial = t.peer.quicPath().dialForMessage
+	}
+	peer, err := dial(ctx)
 	if err != nil {
 		return nil, err
 	}

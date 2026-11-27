@@ -358,7 +358,7 @@ func TestFastSyncMembershipRetainsRootState(t *testing.T) {
 		),
 		0x10,
 	)
-	if err := membership.updatePermanentNode(
+	if err := membership.enrollUncertifiedNode(
 		retainedPermanent,
 		0x20,
 	); err != nil {
@@ -508,7 +508,7 @@ func TestFastSyncMembershipPermanentDemotion(t *testing.T) {
 
 	t.Run("retains_received_certificate", func(t *testing.T) {
 		membership := newTestMembership(roster, 0x10)
-		if err := membership.updatePermanentNode(node, 0x20); err != nil {
+		if err := membership.enrollUncertifiedNode(node, 0x20); err != nil {
 			t.Fatalf("update permanent flags: %v", err)
 		}
 		if err := membership.AuthorizeMember(
@@ -838,7 +838,7 @@ func TestFastSyncMembershipPermanentOmittedCertificate(t *testing.T) {
 	); !errors.Is(err, errFastSyncMemberCertificateRequired) {
 		t.Fatalf("unknown omitted certificate error = %v", err)
 	}
-	if err := membership.updatePermanentNode(
+	if err := membership.enrollUncertifiedNode(
 		unknown,
 		0x22,
 	); !errors.Is(err, ErrNotFound) {
@@ -1129,7 +1129,7 @@ func TestFastSyncMembershipPermanentIgnoresExpiry(t *testing.T) {
 		0,
 		now,
 	)
-	if err := membership.updatePermanentNode(node, 0); err != nil {
+	if err := membership.enrollUncertifiedNode(node, 0); err != nil {
 		t.Fatalf("enroll permanent node: %v", err)
 	}
 

@@ -5,11 +5,14 @@ import (
 	"crypto/ed25519"
 	"errors"
 	"fmt"
+	"net"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/xssnick/gton/service/p2p/internal/fastsync"
+	adnladdr "github.com/xssnick/tonutils-go/adnl/address"
+	"github.com/xssnick/tonutils-go/adnl/keys"
 	"github.com/xssnick/tonutils-go/adnl/overlay"
 	"github.com/xssnick/tonutils-go/tl"
 )
@@ -165,6 +168,168 @@ func TestSetFastSyncOverlaysOmitsDisabledPlumtreeRuntime(t *testing.T) {
 			t.Fatalf("disabled FastSync overlay %v has a Plumtree runtime", shard)
 		}
 	}
+}
+
+func TestFastSyncOverlaysFollowProtectedRegistry(t *testing.T) {
+	node := newTestNode(t)
+	node.zeroStateFileHash = make([]byte, PeerIDSize)
+	shard := FastSyncShard{Workchain: 0, Shard: topShard}
+	validator := fastSyncOverlayTestValidator(0x32, testPeerID("validator"))
+	member := testPeerID("registered full node")
+	state := FastSyncState{
+		Roster:                     NewFastSyncValidatorRoster(nil, []FastSyncValidator{validator}, nil),
+		Shards:                     []FastSyncShard{shard},
+		MasterchainPlumtreeEnabled: true,
+		ShardPlumtreeEnabled:       true,
+	}
+	if err := node.SetFastSyncOverlays(state); err != nil {
+		t.Fatal(err)
+	}
+	if len(node.fastSyncSubscriptions) != 0 {
+		t.Fatal("unregistered local node opened protected overlays")
+	}
+
+	state.Registry = &ProtectedOverlayRegistry{Authorized: []PeerID{node.localID, member}}
+	if err := node.SetFastSyncOverlays(state); err != nil {
+		t.Fatal(err)
+	}
+	sub := node.fastSyncSubscriptions[shard]
+	if sub == nil || sub.plumtree == nil || sub.fastSync.spec.localValidator {
+		t.Fatal("registered full node did not join as a Plumtree receiver")
+	}
+	if sub.spec.ProtoVersionMajor != 3 || sub.spec.ProtoVersionMinor != 3 {
+		t.Fatal("registered overlay did not advertise the version required by the C++ peer probe")
+	}
+	now := time.Now()
+	descriptor, err := sub.fastSync.peers.LocalNode(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := descriptor.Certificate.(overlay.EmptyMemberCertificate); !ok {
+		t.Fatal("registered full node did not announce with an empty certificate")
+	}
+	if err = sub.authorizeQUICPeer(member, quicOverlayHeader{}, now); err != nil {
+		t.Fatal(err)
+	}
+	if sub.fastSync.permanent(member) {
+		t.Fatal("registry member became a permanent validator")
+	}
+
+	state.Registry = &ProtectedOverlayRegistry{Authorized: []PeerID{node.localID}}
+	if err = node.SetFastSyncOverlays(state); err != nil {
+		t.Fatal(err)
+	}
+	sub = node.fastSyncSubscriptions[shard]
+	if err = sub.authorizeQUICPeer(member, quicOverlayHeader{}, now); err == nil {
+		t.Fatal("removed peer could still use the protected overlay")
+	}
+	state.Registry = nil
+	if err = node.SetFastSyncOverlays(state); err != nil {
+		t.Fatal(err)
+	}
+	if len(node.fastSyncSubscriptions) != 0 {
+		t.Fatal("revoked local node retained a protected overlay")
+	}
+}
+
+func TestFastSyncAddressUpdatePreservesOverlayAndPeer(t *testing.T) {
+	node := newTestNode(t)
+	node.zeroStateFileHash = make([]byte, PeerIDSize)
+	if err := node.gateway.StartClient(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = node.gateway.Close() })
+	listen := func() *net.UDPConn {
+		conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+		return conn
+	}
+	oldADNL, newADNL := listen(), listen()
+	oldPort := int32(oldADNL.LocalAddr().(*net.UDPAddr).Port)
+	newPort := int32(newADNL.LocalAddr().(*net.UDPAddr).Port)
+	pub, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash, err := tl.Hash(keys.PublicKeyED25519{Key: pub})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := PeerID(hash)
+	shard := FastSyncShard{Workchain: 0, Shard: topShard}
+	registry := func(adnlPort, quicPort int32) *ProtectedOverlayRegistry {
+		return &ProtectedOverlayRegistry{
+			Authorized: []PeerID{node.localID},
+			Addresses: map[PeerID]ProtectedOverlayAddress{
+				id: {Key: pub, List: &adnladdr.List{Addresses: []adnladdr.Address{
+					adnladdr.UDP{IP: net.IPv4(127, 0, 0, 1), Port: adnlPort},
+					adnladdr.QUIC{IP: net.IPv4(127, 0, 0, 1), Port: quicPort},
+				}}},
+			},
+		}
+	}
+	state := FastSyncState{
+		Roster:                     NewFastSyncValidatorRoster(nil, []FastSyncValidator{fastSyncOverlayTestValidator(0x32, id)}, nil),
+		Shards:                     []FastSyncShard{shard},
+		Registry:                   registry(oldPort, 23000),
+		MasterchainPlumtreeEnabled: true,
+		ShardPlumtreeEnabled:       true,
+	}
+	if err = node.SetFastSyncOverlays(state); err != nil {
+		t.Fatal(err)
+	}
+	sub := node.fastSyncSubscriptions[shard]
+	if sub == nil || sub.plumtree == nil {
+		t.Fatal("protected overlay did not start")
+	}
+	if attached, err := sub.connectFixedNode(t.Context(), id); err != nil || !attached {
+		t.Fatalf("attach reference peer: attached=%v, err=%v", attached, err)
+	}
+	before := sub.peerByID(id)
+	nopper := before.overlay.ADNL.(adnlNopper)
+	checkADNL := func(conn *net.UDPConn) {
+		t.Helper()
+		if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		if err := nopper.SendNop(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := conn.ReadFromUDP(make([]byte, 2048)); err != nil {
+			t.Fatalf("live ADNL did not send to %s: %v", conn.LocalAddr(), err)
+		}
+	}
+	checkADNL(oldADNL)
+
+	state.Registry = registry(newPort, 23001)
+	if err = node.SetFastSyncOverlays(state); err != nil {
+		t.Fatal(err)
+	}
+	if node.fastSyncSubscriptions[shard] != sub || sub.peerByID(id) != before {
+		t.Fatal("address-only update replaced the overlay or its attached peer")
+	}
+	addresses, _, err := node.resolvePeerAddresses(t.Context(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adnlEndpoint, err := firstADNLEndpoint(addresses.Addresses)
+	if err != nil || adnlEndpoint != newADNL.LocalAddr().String() {
+		t.Fatalf("ADNL lookup=%q, err=%v", adnlEndpoint, err)
+	}
+	checkADNL(newADNL)
+	quicEndpoint, err := resolveQUICRoute(t.Context(), node, id, pub, before.route)
+	if err != nil || quicEndpoint != "127.0.0.1:23001" || before.route.QUICAddress() != quicEndpoint {
+		t.Fatalf("QUIC lookup=%q, live route=%q, err=%v", quicEndpoint, before.route.QUICAddress(), err)
+	}
+
+	state.Registry = registry(oldPort, 23000)
+	if err = node.SetFastSyncOverlays(state); err != nil {
+		t.Fatal(err)
+	}
+	checkADNL(oldADNL)
 }
 
 func TestFastSyncPeerLimitIncludesCertificateSlots(t *testing.T) {

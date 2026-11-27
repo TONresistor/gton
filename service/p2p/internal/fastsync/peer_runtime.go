@@ -720,10 +720,10 @@ func enrollNode(
 			now,
 		)
 	}
-	if !membership.IsPermanent(id) {
+	if err := membership.enrollUncertifiedNode(id, flags); err != nil {
 		return errFastSyncMemberNodeCertificateRequired
 	}
-	return membership.updatePermanentNode(id, flags)
+	return nil
 }
 
 func peerVersionValid(version int32, now time.Time) bool {

@@ -341,9 +341,14 @@ func (s *SyncCoordinator) reconcileP2PShardOverlays(ctx context.Context, state *
 			Shard:     shards[i].Shard,
 		}
 	}
+	registry, registryErr := s.protectedRegistry.load(config.cfg, state)
+	if registryErr != nil {
+		s.log.Debug().Err(registryErr).Msg("failed to read protected overlay registry")
+	}
 	err = s.node.SetFastSyncOverlays(p2p.FastSyncState{
 		Roster:                     config.fastSync.roster,
 		Shards:                     fastSyncShards,
+		Registry:                   registry,
 		MasterchainPlumtreeEnabled: config.fastSync.plumtreeEnabled(-1),
 		ShardPlumtreeEnabled:       config.fastSync.plumtreeEnabled(0),
 	})

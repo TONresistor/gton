@@ -67,6 +67,18 @@ type idlePooledPeer struct {
 var errPeerEndpointBusy = errors.New("peer endpoint is in active use")
 var errPooledPeerUnavailable = errors.New("pooled peer is no longer available")
 
+func (p *peerPool) updateADNLAddress(id PeerID, address string) error {
+	peer := p.retainByID(id)
+	if peer == nil {
+		return nil
+	}
+	defer releaseRetainedPeer(p, peer)()
+
+	// RegisterClient updates the endpoint on the existing ADNL peer.
+	_, err := p.gateway.RegisterClient(address, peer.pub)
+	return err
+}
+
 // acquirePeerEndpoint treats the first ADNL connection for a PeerID as canonical.
 func (n *Node) acquirePeerEndpoint(peerID PeerID, endpoint peerEndpoint, key ed25519.PublicKey) (*pooledPeer, func(), error) {
 	if err := validatePeerEndpointIdentity(peerID, key); err != nil {

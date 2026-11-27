@@ -489,6 +489,9 @@ func resolveQUICRoute(
 	publicKey ed25519.PublicKey,
 	route *peerroute.Route,
 ) (string, error) {
+	if address, ok := node.peerAddresses.protectedAddress(id); ok {
+		return peerQUICRouteFromAddresses(address.List.Addresses)
+	}
 	if addr := route.QUICAddress(); addr != "" && !route.QUICAddressStale() {
 		return addr, nil
 	}

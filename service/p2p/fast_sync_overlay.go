@@ -12,6 +12,7 @@ import (
 
 	"github.com/xssnick/gton/service/p2p/internal/fastsync"
 	sharddomain "github.com/xssnick/gton/service/shard"
+	adnladdr "github.com/xssnick/tonutils-go/adnl/address"
 	"github.com/xssnick/tonutils-go/adnl/keys"
 	"github.com/xssnick/tonutils-go/adnl/overlay"
 	"github.com/xssnick/tonutils-go/tl"
@@ -25,11 +26,25 @@ const fastSyncRandomPeersTimeout = 5 * time.Second
 type FastSyncState struct {
 	Roster                     FastSyncValidatorRoster
 	Shards                     []FastSyncShard
+	Registry                   *ProtectedOverlayRegistry
 	MasterchainPlumtreeEnabled bool
 	ShardPlumtreeEnabled       bool
 }
 
+// ProtectedOverlayRegistry is the immutable projection of the masterchain registry.
+type ProtectedOverlayRegistry struct {
+	Authorized []PeerID
+	Addresses  map[PeerID]ProtectedOverlayAddress
+}
+
+type ProtectedOverlayAddress struct {
+	Key  []byte
+	List *adnladdr.List
+}
+
 type fastSyncOverlaySpec struct {
+	registryEnabled           bool
+	authorized                []PeerID
 	roster                    FastSyncValidatorRoster
 	rosterFingerprint         [sha256.Size]byte
 	certificate               *overlay.MemberCertificate
@@ -69,6 +84,7 @@ func newFastSyncOverlayRuntime(
 		spec.roster.rootPublicKeyIDsRef(),
 		spec.roster.adnlIDsRef(),
 		spec.permanentFlags,
+		spec.authorized...,
 	)
 	certificate := fastSyncCertificateValue(spec.certificate)
 	peers, err := fastsync.NewPeerRuntime(
@@ -130,6 +146,8 @@ func fastSyncLocalMemberFlags(receivePlumtreeBroadcasts bool) uint32 {
 
 func (r *fastSyncOverlayRuntime) matches(spec fastSyncOverlaySpec) bool {
 	return r.spec.rosterFingerprint == spec.rosterFingerprint &&
+		r.spec.registryEnabled == spec.registryEnabled &&
+		slices.Equal(r.spec.authorized, spec.authorized) &&
 		r.spec.localValidator == spec.localValidator &&
 		r.spec.receivePlumtreeBroadcasts == spec.receivePlumtreeBroadcasts &&
 		r.spec.plumtreeEnabled == spec.plumtreeEnabled &&
@@ -357,7 +375,8 @@ func (n *Node) applyFastSyncOverlaysLocked(state FastSyncState) error {
 	if err != nil {
 		return err
 	}
-	if !localValidator && certificate == nil {
+	localRegistered := state.Registry != nil && slices.Contains(state.Registry.Authorized, n.localID)
+	if !localValidator && certificate == nil && !localRegistered {
 		desiredShards = nil
 	}
 
@@ -373,6 +392,7 @@ func (n *Node) applyFastSyncOverlaysLocked(state FastSyncState) error {
 			certificate,
 			localValidator,
 			plumtreeEnabled,
+			state.Registry,
 		)
 		if err != nil {
 			return err
@@ -380,6 +400,7 @@ func (n *Node) applyFastSyncOverlaysLocked(state FastSyncState) error {
 		desired[shard] = spec
 	}
 
+	n.updateProtectedPeerAddresses(state.Registry)
 	return n.reconcileFastSyncOverlays(desired)
 }
 
@@ -502,6 +523,7 @@ func (n *Node) buildFastSyncOverlaySpec(
 	certificate *overlay.MemberCertificate,
 	localValidator,
 	plumtreeEnabled bool,
+	registry *ProtectedOverlayRegistry,
 ) (overlaySpec, error) {
 	var zeroHash FastSyncFileHash
 	if len(n.chainNode().zeroStateFileHash) != len(zeroHash) {
@@ -534,6 +556,7 @@ func (n *Node) buildFastSyncOverlaySpec(
 	}
 
 	fastSyncSpec := fastSyncOverlaySpec{
+		registryEnabled:           registry != nil,
 		roster:                    roster,
 		rosterFingerprint:         roster.Fingerprint(),
 		certificate:               certificate,
@@ -541,6 +564,9 @@ func (n *Node) buildFastSyncOverlaySpec(
 		receivePlumtreeBroadcasts: receivePlumtreeBroadcasts,
 		plumtreeEnabled:           plumtreeEnabled,
 		permanentFlags:            permanentFlags,
+	}
+	if registry != nil {
+		fastSyncSpec.authorized = registry.Authorized
 	}
 	if certificate != nil {
 		encoded, err := tl.Serialize(*certificate, true)
@@ -558,6 +584,12 @@ func (n *Node) buildFastSyncOverlaySpec(
 	if shard.Workchain == -1 {
 		protoMajor = int32(masterchainProtoVersionMajor)
 		protoMinor = int32(masterchainProtoVersionMinor)
+	}
+	if registry != nil {
+		// The v2026.11 overlay probes pending peers and requires 3.3 before
+		// admitting them as broadcast recipients.
+		protoMajor = publicQUICVersionMajor
+		protoMinor = publicQUICVersionMinor
 	}
 
 	return overlaySpec{

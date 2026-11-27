@@ -211,6 +211,7 @@ type SyncCoordinator struct {
 	shardOverlayRunning         bool
 	shardOverlayReconcileMu     sync.Mutex
 	shardOverlayReconciledSeqno uint32
+	protectedRegistry           protectedRegistryCache
 	bindMu                      sync.Mutex
 	started                     bool
 	startOnce                   sync.Once

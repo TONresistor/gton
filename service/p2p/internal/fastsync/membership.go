@@ -57,6 +57,7 @@ type Membership struct {
 
 	roots              map[ID]*membershipRoot
 	permanent          map[ID]permanentMember
+	authorized         map[ID]uint32
 	enrolled           map[ID]enrolledMember
 	blockedSources     map[ID]time.Time
 	blockedDeadlines   []blockedSource
@@ -126,11 +127,13 @@ func NewMembership[SourceID ID32](
 	rootIDs,
 	permanentIDs []SourceID,
 	permanentFlags uint32,
+	authorizedIDs ...SourceID,
 ) *Membership {
 	membership := &Membership{
-		roots:     make(map[ID]*membershipRoot, len(rootIDs)),
-		permanent: make(map[ID]permanentMember, len(permanentIDs)),
-		enrolled:  make(map[ID]enrolledMember),
+		roots:      make(map[ID]*membershipRoot, len(rootIDs)),
+		permanent:  make(map[ID]permanentMember, len(permanentIDs)),
+		authorized: make(map[ID]uint32, len(authorizedIDs)),
+		enrolled:   make(map[ID]enrolledMember),
 	}
 
 	for _, source := range rootIDs {
@@ -142,6 +145,9 @@ func NewMembership[SourceID ID32](
 		membership.permanent[peer] = permanentMember{
 			flags: permanentFlags,
 		}
+	}
+	for _, source := range authorizedIDs {
+		membership.authorized[ID(source)] = 0
 	}
 
 	return membership
@@ -311,6 +317,9 @@ func (m *Membership) authorizeStoredMember(
 	if _, permanent := m.permanent[node]; permanent {
 		return nil
 	}
+	if _, authorized := m.authorized[node]; authorized {
+		return nil
+	}
 
 	member, found := m.enrolled[node]
 	if !found {
@@ -347,6 +356,9 @@ func (m *Membership) enrollCertifiedNode(
 	if err != nil {
 		return err
 	}
+	if _, authorized := m.authorized[node]; authorized {
+		m.authorized[node] = nodeFlags
+	}
 
 	if member, permanent := m.permanent[node]; permanent {
 		member.flags = nodeFlags
@@ -382,7 +394,7 @@ func (m *Membership) enrollCertifiedNode(
 	return nil
 }
 
-func (m *Membership) updatePermanentNode(
+func (m *Membership) enrollUncertifiedNode(
 	node ID,
 	nodeFlags uint32,
 ) error {
@@ -390,13 +402,16 @@ func (m *Membership) updatePermanentNode(
 	defer m.mu.Unlock()
 
 	member, permanent := m.permanent[node]
-	if !permanent {
-		return ErrNotFound
+	if permanent {
+		member.flags = nodeFlags
+		m.permanent[node] = member
+		return nil
 	}
-
-	member.flags = nodeFlags
-	m.permanent[node] = member
-	return nil
+	if _, authorized := m.authorized[node]; authorized {
+		m.authorized[node] = nodeFlags
+		return nil
+	}
+	return ErrNotFound
 }
 
 func (m *Membership) PeerFlags(node ID) (uint32, error) {
@@ -405,6 +420,9 @@ func (m *Membership) PeerFlags(node ID) (uint32, error) {
 
 	if member, permanent := m.permanent[node]; permanent {
 		return member.flags, nil
+	}
+	if flags, authorized := m.authorized[node]; authorized {
+		return flags, nil
 	}
 	if member, enrolled := m.enrolled[node]; enrolled {
 		return member.flags, nil
@@ -423,6 +441,9 @@ func (m *Membership) Contains(node ID, now time.Time) bool {
 	defer m.mu.Unlock()
 
 	if _, permanent := m.permanent[node]; permanent {
+		return true
+	}
+	if _, authorized := m.authorized[node]; authorized {
 		return true
 	}
 	member, enrolled := m.enrolled[node]

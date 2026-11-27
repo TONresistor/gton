@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	adnladdr "github.com/xssnick/tonutils-go/adnl/address"
@@ -38,9 +39,63 @@ type peerAddressLookup struct {
 // concurrent lookups for the same peer. Address lists remain immutable after
 // parsing, so callers can safely share the result.
 type peerAddressResolver struct {
-	mx       sync.Mutex
-	cache    map[PeerID]peerAddressCacheEntry
-	inFlight map[PeerID]*peerAddressLookup
+	protected atomic.Pointer[ProtectedOverlayRegistry]
+	mx        sync.Mutex
+	cache     map[PeerID]peerAddressCacheEntry
+	inFlight  map[PeerID]*peerAddressLookup
+}
+
+func (r *peerAddressResolver) protectedAddress(id PeerID) (ProtectedOverlayAddress, bool) {
+	if registry := r.protected.Load(); registry != nil {
+		address, ok := registry.Addresses[id]
+		return address, ok
+	}
+	return ProtectedOverlayAddress{}, false
+}
+
+func (n *Node) updateProtectedPeerAddresses(registry *ProtectedOverlayRegistry) {
+	previous := n.peerAddresses.protected.Swap(registry)
+	if previous == registry {
+		return
+	}
+
+	var oldAddresses, addresses map[PeerID]ProtectedOverlayAddress
+	if previous != nil {
+		oldAddresses = previous.Addresses
+	}
+	if registry != nil {
+		addresses = registry.Addresses
+	}
+	for id := range oldAddresses {
+		if _, present := addresses[id]; !present {
+			n.peerRoutes.Get(id).MarkQUICAddressStale()
+		}
+	}
+	for id, address := range addresses {
+		endpoint := protectedPeerEndpoint(address.List)
+		if endpoint == protectedPeerEndpoint(oldAddresses[id].List) {
+			continue
+		}
+		if endpoint.quicAddr != "" {
+			n.peerRoutes.Get(id).RefreshQUICAddress(endpoint.quicAddr)
+		}
+		if endpoint.adnlAddr != "" {
+			if err := n.pool.updateADNLAddress(id, endpoint.adnlAddr); err != nil {
+				n.log.Debug().Err(err).Str("peer_id", id.String()).Msg("failed to refresh active ADNL peer address")
+			}
+		}
+		n.log.Debug().Str("peer_id", id.String()).Str("adnl", endpoint.adnlAddr).
+			Str("quic", endpoint.quicAddr).Msg("updated protected overlay peer address")
+	}
+}
+
+func protectedPeerEndpoint(list *adnladdr.List) peerEndpoint {
+	if list == nil {
+		return peerEndpoint{}
+	}
+	adnl, _ := firstADNLEndpoint(list.Addresses)
+	quic, _ := peerQUICRouteFromAddresses(list.Addresses)
+	return peerEndpoint{adnlAddr: adnl, quicAddr: quic}
 }
 
 func (n *Node) resolvePeerAddresses(
@@ -64,6 +119,9 @@ func (r *peerAddressResolver) resolve(
 	id PeerID,
 	maxAge time.Duration,
 ) (*adnladdr.List, ed25519.PublicKey, error) {
+	if address, ok := r.protectedAddress(id); ok {
+		return address.List, address.Key, nil
+	}
 	now := time.Now()
 
 	r.mx.Lock()
